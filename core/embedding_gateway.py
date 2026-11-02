@@ -178,6 +178,8 @@ class SharedEmbeddingGateway:
                 batch_size=min(self.config.get("upstream_batch_size", 10), 10)
                 if provider.provider_config["type"] == "dashscope_embedding"
                 else self.config.get("upstream_batch_size", 10),
+                model=self.model_name,
+                provider_id=str(provider.provider_config.get("id", "")),
             )
             runner = None
             self.session = session
@@ -225,7 +227,9 @@ class SharedEmbeddingGateway:
                 raise UpstreamEmbeddingError(getattr(exc, "status_code", 502)) from None
             rows = result.data
             if sorted(row.index for row in rows) != list(range(len(texts))):
-                raise ValueError("Embedding response indexes do not match inputs")
+                error = ValueError("Embedding response indexes do not match inputs")
+                error.usage_tokens = self._tokens(getattr(result, "usage", None))
+                raise error
             vectors = [row.embedding for row in sorted(rows, key=lambda row: row.index)]
             return vectors, self._tokens(getattr(result, "usage", None))
         base = cfg["embedding_api_base"].rstrip("/")
@@ -247,7 +251,9 @@ class SharedEmbeddingGateway:
             data = await response.json()
         rows = data.get("output", {}).get("embeddings", [])
         if sorted(row.get("text_index") for row in rows) != list(range(len(texts))):
-            raise ValueError("Embedding response indexes do not match inputs")
+            error = ValueError("Embedding response indexes do not match inputs")
+            error.usage_tokens = self._tokens(data.get("usage"))
+            raise error
         vectors = [row["embedding"] for row in sorted(rows, key=lambda r: r["text_index"])]
         return vectors, self._tokens(data.get("usage"))
 
@@ -300,9 +306,15 @@ class SharedEmbeddingGateway:
             assert self.cache is not None
             if self.fingerprint(provider) != self.cache.namespace:
                 raise RuntimeError("Provider changed; reload LivingMemory")
-            vectors, tokens, info = await self.cache.get(texts)
-            self._record(self._caller(), info, tokens)
-            return vectors
+            async def measured():
+                hook = getattr(provider, "_bot_manager_embedding_context", None)
+                trace = hook() if callable(hook) else None
+                vectors, tokens, info = await self.cache.get(texts, trace=trace)
+                self._record(self._caller(), info, tokens)
+                return vectors
+            # 包装顺序不同也能获取同一逻辑 call_id；监控插件缺席时保持正常调用。
+            meter = getattr(provider, "_bot_manager_meter_embedding", None)
+            return await meter(measured) if callable(meter) and texts else await measured()
 
         async def get_one(text):
             values = await get_many([text])

@@ -10,6 +10,7 @@ import sqlite3
 import struct
 import threading
 import time
+import uuid
 from collections import OrderedDict
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -30,6 +31,8 @@ class EmbeddingCache:
         concurrency: int = 2,
         max_pending: int = 256,
         batch_size: int = 10,
+        model: str = "",
+        provider_id: str = "",
     ):
         if type(batch_size) is not int or not 1 <= batch_size <= 128:
             raise ValueError("Embedding batch size must be between 1 and 128")
@@ -40,6 +43,8 @@ class EmbeddingCache:
         self.max_entries = max_entries
         self.max_pending = max_pending
         self.batch_size = batch_size
+        self.model = model
+        self.provider_id = provider_id
         self._lock = asyncio.Lock()
         self._db_lock = threading.Lock()
         self._semaphore = asyncio.Semaphore(concurrency)
@@ -78,7 +83,76 @@ class EmbeddingCache:
             self._db.execute(
                 "ALTER TABLE usage_totals ADD COLUMN unknown_requests INTEGER NOT NULL DEFAULT 0"
             )
+        # 基线只冻结一次：旧累计与逐笔流水在这里衔接，重启不能重新冻结。
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS usage_journal_activation ("
+            "namespace TEXT PRIMARY KEY, activated_at REAL NOT NULL, counter_json TEXT NOT NULL)"
+        )
+        counter = self._db.execute(
+            "SELECT requests,inputs,tokens,unknown_requests FROM usage_totals WHERE namespace=?",
+            (self.namespace,),
+        ).fetchone() or (0, 0, 0, 0)
+        self._db.execute(
+            "INSERT OR IGNORE INTO usage_journal_activation VALUES (?,?,?)",
+            (self.namespace, time.time(), json.dumps(dict(zip(
+                ("requests", "inputs", "tokens", "unknown_requests"), counter)))),
+        )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS usage_journal ("
+            "id TEXT PRIMARY KEY, namespace TEXT NOT NULL, kind TEXT NOT NULL,"
+            "started_at REAL NOT NULL, ended_at REAL, tokens INTEGER,"
+            "status TEXT NOT NULL, inputs INTEGER NOT NULL, trace_json TEXT NOT NULL,"
+            "info_json TEXT NOT NULL, model TEXT NOT NULL, provider_id TEXT NOT NULL)"
+        )
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS usage_journal_namespace ON usage_journal(namespace)"
+        )
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS usage_journal_call ON "
+            "usage_journal(namespace,json_extract(trace_json,'$.call_id'))"
+        )
+        self._db.execute(
+            "UPDATE usage_journal SET status='incomplete',ended_at=? "
+            "WHERE namespace=? AND status='in_progress'", (time.time(), self.namespace),
+        )
         self._db.commit()
+        self.stats["journal_failures"] = 0
+
+    def _journal(self, ident, kind, started, tokens, status, inputs, trace, info):
+        assert self._db is not None
+        with self._db_lock, self._db:
+            old = self._db.execute(
+                "SELECT status FROM usage_journal WHERE id=?", (ident,)
+            ).fetchone()
+            self._db.execute(
+                "INSERT INTO usage_journal VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET ended_at=excluded.ended_at,"
+                "tokens=excluded.tokens,status=excluded.status,info_json=excluded.info_json",
+                (ident, self.namespace, kind, started,
+                 None if status == "in_progress" else time.time(), tokens, status, inputs,
+                 json.dumps(trace or {}), json.dumps(info or {}), self.model, self.provider_id),
+            )
+            # 真实上游响应与累计值同事务；向量写入失败不再丢失已付费计量。
+            if kind == "upstream" and status != "in_progress" and (
+                old is None or old[0] == "in_progress"
+            ):
+                self._db.execute(
+                    "INSERT INTO usage_totals(namespace,requests,inputs,tokens,unknown_requests) "
+                    "VALUES (?,1,?,?,?) ON CONFLICT(namespace) DO UPDATE SET "
+                    "requests=requests+1,inputs=inputs+excluded.inputs,"
+                    "tokens=tokens+excluded.tokens,"
+                    "unknown_requests=unknown_requests+excluded.unknown_requests",
+                    (self.namespace, inputs, tokens or 0, int(tokens is None)),
+                )
+
+    async def _record_journal(self, *args, required=False):
+        try:
+            await asyncio.to_thread(self._journal, *args)
+        except sqlite3.Error:
+            # 计量故障可见，不能因此触发供应商重复付费请求。
+            self.stats["journal_failures"] += 1
+            if required:
+                raise RuntimeError("Embedding usage journal unavailable") from None
 
     def key(self, text: str) -> str:
         # 不去掉空格、时间或标点：缓存键与真正发给模型的输入完全一致。
@@ -129,14 +203,6 @@ class EmbeddingCache:
                 ],
             )
             self._db.execute(
-                "INSERT INTO usage_totals (namespace,requests,inputs,tokens,unknown_requests) "
-                "VALUES (?,1,?,?,?) ON CONFLICT(namespace) "
-                "DO UPDATE SET requests=requests+1,inputs=inputs+excluded.inputs,"
-                "tokens=tokens+excluded.tokens,"
-                "unknown_requests=unknown_requests+excluded.unknown_requests",
-                (self.namespace, len(items), tokens or 0, int(tokens is None)),
-            )
-            self._db.execute(
                 "DELETE FROM embeddings WHERE created_at < ?", (timestamp - self.ttl_seconds,)
             )
             self._db.execute(
@@ -145,7 +211,7 @@ class EmbeddingCache:
                 (self.max_entries,),
             )
 
-    async def get(self, texts: list[str]) -> tuple[list[list[float]], int | None, dict]:
+    async def get(self, texts: list[str], *, trace=None) -> tuple[list[list[float]], int | None, dict]:
         if self._closed or self._db is None:
             raise RuntimeError("Embedding cache unavailable")
         if not isinstance(texts, list) or any(not isinstance(t, str) or not t for t in texts):
@@ -157,6 +223,7 @@ class EmbeddingCache:
         keys = [self.key(t) for t in texts]
         unique = dict(zip(keys, texts))
         local = dict(hits=0, misses=0, coalesced=0)
+        access_id, started = uuid.uuid4().hex, time.time()
         async with self._lock:
             if self._closed:
                 raise RuntimeError("Embedding cache unavailable")
@@ -188,24 +255,40 @@ class EmbeddingCache:
                     local["misses"] += 1
                 waiting[key] = self._pending[key]
             if new:
-                task = asyncio.create_task(self._populate(list(new.items())))
+                task = asyncio.create_task(self._populate(list(new.items()), trace))
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
             self.stats["requests"] += 1
             self.stats["inputs"] += len(texts)
             self.stats["cache_hits"] += local["hits"]
             self.stats["coalesced"] += local["coalesced"]
+        await self._record_journal(
+            access_id, "access", started, 0 if not new else None,
+            "in_progress", len(texts), trace, local,
+        )
         actual_tokens = 0
         unknown_usage = False
-        for key, future in waiting.items():
-            vector, tokens = await asyncio.shield(future)
-            cached[key] = vector
-            # 只由发起 miss 的请求计实际消耗；等待同一结果者不会重复计费。
-            if key in new:
-                if tokens is None:
-                    unknown_usage = True
-                else:
-                    actual_tokens += tokens
+        try:
+            for key, future in waiting.items():
+                vector, tokens = await asyncio.shield(future)
+                cached[key] = vector
+                # 只由发起 miss 的请求计实际消耗；等待同一结果者不会重复计费。
+                if key in new:
+                    if tokens is None:
+                        unknown_usage = True
+                    else:
+                        actual_tokens += tokens
+        except BaseException as exc:
+            await self._record_journal(
+                access_id, "access", started, None if new else 0,
+                "cancelled" if isinstance(exc, asyncio.CancelledError) else "error",
+                len(texts), trace, local,
+            )
+            raise
+        await self._record_journal(
+            access_id, "access", started, None if unknown_usage else actual_tokens,
+            "completed", len(texts), trace, local,
+        )
         return [list(cached[key]) for key in keys], None if unknown_usage else actual_tokens, local
 
     @staticmethod
@@ -213,14 +296,30 @@ class EmbeddingCache:
         if not future.cancelled():
             future.exception()
 
-    async def _populate(self, items: list[tuple[str, str]]):
+    async def _populate(self, items: list[tuple[str, str]], trace=None):
         try:
             async with self._semaphore:
                 for start in range(0, len(items), self.batch_size):
                     chunk = items[start:start + self.batch_size]
                     self.stats["upstream_requests"] += 1
                     self.stats["upstream_inputs"] += len(chunk)
-                    vectors, tokens = await self.fetch([text for _, text in chunk])
+                    ident, started = uuid.uuid4().hex, time.time()
+                    await self._record_journal(
+                        ident, "upstream", started, None, "in_progress", len(chunk), trace, {},
+                        required=True,
+                    )
+                    try:
+                        vectors, tokens = await self.fetch([text for _, text in chunk])
+                    except BaseException as exc:
+                        await self._record_journal(
+                            ident, "upstream", started, getattr(exc, "usage_tokens", None),
+                            "cancelled" if isinstance(exc, asyncio.CancelledError) else "error",
+                            len(chunk), trace, {"error_type": type(exc).__name__},
+                        )
+                        raise
+                    await self._record_journal(
+                        ident, "upstream", started, tokens, "completed", len(chunk), trace, {},
+                    )
                     if tokens is None:
                         self.stats["unknown_upstream_requests"] += 1
                     else:
