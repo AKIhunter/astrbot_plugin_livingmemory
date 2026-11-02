@@ -3,9 +3,9 @@
 </p>
 
 > 本仓库是 AKIhunter 的服务器维护 fork，基于官方 2.8.4，默认分支为
-> `server/shared-embedding-cache`。已集成百炼 v4 统一向量缓存并保留服务器补丁；
+> `main`。已集成百炼 v4 统一向量缓存并保留服务器补丁；
 > [接入与计量](docs/shared-embedding-cache.md) · [发布与升级记录](docs/server-maintenance.md)。
-> 保留上游作者、文档及 AGPL-3.0 许可证。后续升级请使用此 fork 的维护分支。
+> 保留上游作者、文档及 AGPL-3.0 许可证。后续升级请使用此 fork 的 `main` 分支。
 
 ![LivingMemory：连接偏好、人物、计划与上下文的长期记忆](docs/public/images/livingmemory-cover.svg)
 

@@ -2,9 +2,10 @@
 
 维护仓库：https://github.com/AKIhunter/astrbot_plugin_livingmemory
 
-分支：`server/shared-embedding-cache`
+默认主分支：`main`。本次优化从 `server/shared-embedding-cache` 同步至主分支，
+原维护分支保留升级时的提交记录。
 
-插件元数据中的仓库地址指向此 fork，默认分支设为维护分支，确保宿主常规更新
+插件元数据中的仓库地址指向此 fork，默认分支设为 `main`，确保宿主常规更新
 从维护源码获取。官方上游源码通过 `upstream` 单独跟踪。
 
 ## 源码来源
