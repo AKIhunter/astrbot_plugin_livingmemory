@@ -182,7 +182,8 @@ class MemoryRecall:
                     return
 
                 if not actual_query:
-                    logger.warning(f"[{session_id}] 原始用户消息为空，跳过记忆召回")
+                    # 工具轮次可能没有用户正文，保留线上降噪补丁。
+                    logger.debug(f"[{session_id}] 原始用户消息为空，跳过记忆召回")
                     return
 
                 # 获取过滤配置
