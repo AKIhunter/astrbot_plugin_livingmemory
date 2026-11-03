@@ -21,6 +21,9 @@ from astrbot.api import logger
 BINDING_STATUS_ACTIVE = "active"
 BINDING_STATUS_REVOKED = "revoked"
 BINDING_STATUS_SUPERSEDED = "superseded"
+BINDING_STATUS_PENDING = "pending"
+BINDING_STATUS_APPROVED = "approved"
+BINDING_STATUS_REJECTED = "rejected"
 
 _BINDING_SCHEMA = (
     """
@@ -75,6 +78,42 @@ _BINDING_SCHEMA = (
     """
     CREATE INDEX IF NOT EXISTS idx_binding_audit_binding
     ON binding_audit(binding_id, created_at)
+    """,
+    # 阶段 3 绑定管理：自动识别结果先进待审队列，人工逐条通过后才落正式绑定。
+    """
+    CREATE TABLE IF NOT EXISTS binding_candidate (
+        candidate_id TEXT PRIMARY KEY,
+        person_id TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        display_name TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'auto',
+        evidence_type TEXT NOT NULL DEFAULT '',
+        evidence_ref TEXT NOT NULL DEFAULT '',
+        confidence REAL NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'pending',
+        matched_rule TEXT NOT NULL DEFAULT '',
+        note TEXT NOT NULL DEFAULT '',
+        submitted_by TEXT NOT NULL DEFAULT '',
+        reviewed_by TEXT NOT NULL DEFAULT '',
+        review_reason TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        reviewed_at REAL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_binding_candidate_status
+    ON binding_candidate(status, platform, account_id)
+    """,
+    # 绑定管理的小配置（auto_approve 等）与绑定表放在同一库，审计可同源。
+    """
+    CREATE TABLE IF NOT EXISTS binding_setting (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL DEFAULT '',
+        updated_by TEXT NOT NULL DEFAULT '',
+        updated_at REAL NOT NULL
+    )
     """,
 )
 
@@ -141,14 +180,30 @@ class IdentityStore:
             return [dict(row) for row in await cursor.fetchall()]
 
     async def list_bindings(
-        self, *, person_id: str = "", include_history: bool = False
+        self,
+        *,
+        person_id: str = "",
+        platform: str = "",
+        account_id: str = "",
+        status: str = "",
+        include_history: bool = False,
     ) -> list[dict[str, Any]]:
+        """绑定列表：支持按人物/平台/账号/状态筛选（阶段 3 页面用）。"""
         query = "SELECT * FROM person_binding"
         clauses, params = [], []
         if person_id:
             clauses.append("person_id = ?")
             params.append(str(person_id))
-        if not include_history:
+        if platform:
+            clauses.append("platform = ?")
+            params.append(str(platform).lower())
+        if account_id:
+            clauses.append("account_id = ?")
+            params.append(str(account_id))
+        if status:
+            clauses.append("status = ?")
+            params.append(str(status))
+        elif not include_history:
             clauses.append("status = 'active'")
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
@@ -157,6 +212,42 @@ class IdentityStore:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(query, params)
             return [dict(row) for row in await cursor.fetchall()]
+
+    async def list_audit(
+        self,
+        *,
+        binding_id: str = "",
+        action: str = "",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """审计只读列表：操作人、依据、审核人、文件哈希都在这里回显。"""
+        query = "SELECT * FROM binding_audit"
+        clauses, params = [], []
+        if binding_id:
+            clauses.append("binding_id = ?")
+            params.append(str(binding_id))
+        if action:
+            clauses.append("action = ?")
+            params.append(str(action))
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        params.extend([max(1, min(500, int(limit or 100))), max(0, int(offset or 0))])
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(query, params)
+            rows = []
+            for row in await cursor.fetchall():
+                item = dict(row)
+                # 前端要直接看变更前后，这里解析成对象；坏数据保持原始字符串。
+                for field in ("before_json", "after_json"):
+                    try:
+                        item[field] = json.loads(item.get(field) or "{}")
+                    except (json.JSONDecodeError, TypeError):
+                        item[field] = {}
+                rows.append(item)
+            return rows
 
     # ---------------------------------------------------------------- 审计
     @staticmethod
@@ -525,6 +616,285 @@ class IdentityStore:
             )
             await db.commit()
             return restored
+
+    # ---------------------------------------------------------------- 绑定设置
+    async def get_settings(self) -> dict[str, Any]:
+        """读取绑定管理设置；auto_approve 默认关闭。"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT key, value, updated_by, updated_at FROM binding_setting")
+            values = {str(row["key"]): row for row in await cursor.fetchall()}
+        auto_row = values.get("auto_approve")
+        reason_row = values.get("auto_approve_reason")
+        return {
+            "auto_approve": bool(auto_row and str(auto_row["value"]) == "1"),
+            "auto_approve_reason": str(reason_row["value"]) if reason_row else "",
+            "updated_by": str(auto_row["updated_by"]) if auto_row else "",
+            "updated_at": float(auto_row["updated_at"]) if auto_row else 0.0,
+            "risk_notice": "开启后自动识别的绑定会跳过逐条人工审核，可能把陌生人合并进同一人物，默认必须关闭。",
+        }
+
+    async def set_auto_approve(
+        self,
+        enabled: bool,
+        *,
+        reason: str = "",
+        operator: str = "",
+        reviewer: str = "",
+        risk_ack: bool = False,
+        channel: str = "page",
+        request_id: str = "",
+    ) -> dict[str, Any]:
+        """开启 auto_approve 必须写明理由并确认风险；变更强制写审计。"""
+        reason = str(reason or "").strip()
+        if enabled and not reason:
+            raise ValueError("开启 auto_approve 必须写明理由")
+        if enabled and not risk_ack:
+            raise ValueError("开启 auto_approve 需要确认风险提示")
+        before = await self.get_settings()
+        now = self._now()
+        after = {
+            **before,
+            "auto_approve": bool(enabled),
+            "auto_approve_reason": reason,
+            "updated_by": operator,
+            "updated_at": now,
+        }
+        async with aiosqlite.connect(self.db_path) as db:
+            for key, value in (
+                ("auto_approve", "1" if enabled else "0"),
+                ("auto_approve_reason", reason),
+            ):
+                await db.execute(
+                    """
+                    INSERT INTO binding_setting(key, value, updated_by, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_by = excluded.updated_by,
+                        updated_at = excluded.updated_at
+                    """,
+                    (key, value, operator, now),
+                )
+            await self._append_audit(
+                db, action="config", binding_id="", version=0,
+                before=before, after=after, channel=channel,
+                operator_id=operator, operator_name=operator,
+                reviewer_id=reviewer, reason=reason, request_id=request_id,
+            )
+            await db.commit()
+        return after
+
+    # ---------------------------------------------------------------- 待审候选
+    async def submit_candidate(
+        self,
+        *,
+        person_id: str,
+        platform: str,
+        account_id: str,
+        display_name: str = "",
+        source: str = "auto",
+        evidence_type: str = "",
+        evidence_ref: str = "",
+        confidence: float = 0.0,
+        matched_rule: str = "",
+        note: str = "",
+        submitted_by: str = "",
+        request_id: str = "",
+    ) -> dict[str, Any]:
+        """自动识别结果入待审队列；auto_approve 关闭时不会直接改正式绑定。"""
+        person_id = str(person_id or "").strip()
+        platform = str(platform or "").strip().lower()
+        account_id = str(account_id or "").strip()
+        if not person_id or not platform or not account_id:
+            raise ValueError("person_id / platform / account_id 均不能为空")
+        now = self._now()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT * FROM binding_candidate
+                WHERE platform = ? AND account_id = ? AND status = 'pending'
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (platform, account_id),
+            )
+            existing = await cursor.fetchone()
+            if existing:
+                candidate = {
+                    **dict(existing),
+                    "person_id": person_id,
+                    "display_name": display_name,
+                    "source": source,
+                    "evidence_type": evidence_type,
+                    "evidence_ref": evidence_ref,
+                    "confidence": float(confidence or 0),
+                    "matched_rule": matched_rule,
+                    "note": note,
+                    "submitted_by": submitted_by,
+                    "updated_at": now,
+                }
+                await db.execute(
+                    """
+                    UPDATE binding_candidate
+                    SET person_id = ?, display_name = ?, source = ?, evidence_type = ?,
+                        evidence_ref = ?, confidence = ?, matched_rule = ?, note = ?,
+                        submitted_by = ?, updated_at = ?
+                    WHERE candidate_id = ?
+                    """,
+                    (
+                        person_id, display_name, source, evidence_type, evidence_ref,
+                        float(confidence or 0), matched_rule, note, submitted_by,
+                        now, candidate["candidate_id"],
+                    ),
+                )
+                action = "candidate_update"
+                before = dict(existing)
+            else:
+                candidate = {
+                    "candidate_id": uuid4().hex,
+                    "person_id": person_id,
+                    "platform": platform,
+                    "account_id": account_id,
+                    "display_name": display_name,
+                    "source": source,
+                    "evidence_type": evidence_type,
+                    "evidence_ref": evidence_ref,
+                    "confidence": float(confidence or 0),
+                    "status": BINDING_STATUS_PENDING,
+                    "matched_rule": matched_rule,
+                    "note": note,
+                    "submitted_by": submitted_by,
+                    "reviewed_by": "",
+                    "review_reason": "",
+                    "created_at": now,
+                    "updated_at": now,
+                    "reviewed_at": None,
+                }
+                await db.execute(
+                    """
+                    INSERT INTO binding_candidate(
+                        candidate_id, person_id, platform, account_id, display_name,
+                        source, evidence_type, evidence_ref, confidence, status,
+                        matched_rule, note, submitted_by, reviewed_by, review_reason,
+                        created_at, updated_at, reviewed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    tuple(candidate.values()),
+                )
+                action = "candidate_submit"
+                before = {}
+            await self._append_audit(
+                db, action=action, binding_id=candidate["candidate_id"],
+                version=0, before=before, after=candidate, channel="auto",
+                operator_id=submitted_by, operator_name=submitted_by,
+                evidence_type=evidence_type, evidence_ref=evidence_ref,
+                reason="自动识别待人工审核", request_id=request_id,
+            )
+            await db.commit()
+
+        settings = await self.get_settings()
+        if settings.get("auto_approve"):
+            reviewed = await self.review_candidate(
+                candidate["candidate_id"], approve=True,
+                reviewer="auto_approve",
+                reason=f"auto_approve：{settings.get('auto_approve_reason') or '已开启'}",
+                channel="auto",
+            )
+            return {"candidate": candidate, "auto_approved": True, "binding": (reviewed or {}).get("binding")}
+        return {"candidate": candidate, "auto_approved": False}
+
+    async def list_candidates(
+        self, *, status: str = "pending", platform: str = "", person_id: str = "", limit: int = 100
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM binding_candidate"
+        clauses, params = [], []
+        if status:
+            clauses.append("status = ?")
+            params.append(str(status))
+        if platform:
+            clauses.append("platform = ?")
+            params.append(str(platform).lower())
+        if person_id:
+            clauses.append("person_id = ?")
+            params.append(str(person_id))
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(max(1, min(500, int(limit or 100))))
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(query, params)
+            return [dict(row) for row in await cursor.fetchall()]
+
+    async def review_candidate(
+        self,
+        candidate_id: str,
+        *,
+        approve: bool,
+        reviewer: str = "",
+        reason: str = "",
+        channel: str = "page",
+        request_id: str = "",
+    ) -> dict[str, Any] | None:
+        """逐条审核：通过才写正式绑定，驳回只改候选状态，两种都留审计。"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM binding_candidate WHERE candidate_id = ?",
+                (str(candidate_id),),
+            )
+            row = await cursor.fetchone()
+            if not row or row["status"] != BINDING_STATUS_PENDING:
+                return None
+            candidate = dict(row)
+        now = self._now()
+        binding = None
+        if approve:
+            binding = await self.upsert_binding(
+                person_id=candidate["person_id"],
+                platform=candidate["platform"],
+                account_id=candidate["account_id"],
+                display_name=candidate["display_name"],
+                source=candidate["source"] or "auto",
+                evidence_type=candidate["evidence_type"],
+                evidence_ref=candidate["evidence_ref"],
+                operator=candidate["submitted_by"] or reviewer,
+                reviewer=reviewer,
+                note=candidate["note"],
+                channel=channel,
+                reason=reason or "人工审核通过",
+                request_id=request_id,
+            )
+        status = BINDING_STATUS_APPROVED if approve else BINDING_STATUS_REJECTED
+        after = {
+            **candidate,
+            "status": status,
+            "reviewed_by": reviewer,
+            "review_reason": reason,
+            "reviewed_at": now,
+            "updated_at": now,
+        }
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE binding_candidate
+                SET status = ?, reviewed_by = ?, review_reason = ?, reviewed_at = ?, updated_at = ?
+                WHERE candidate_id = ? AND status = 'pending'
+                """,
+                (status, reviewer, reason, now, now, str(candidate_id)),
+            )
+            await self._append_audit(
+                db,
+                action="candidate_approve" if approve else "candidate_reject",
+                binding_id=str(candidate_id), version=0,
+                before=candidate, after=after, channel=channel,
+                operator_id=reviewer, operator_name=reviewer, reviewer_id=reviewer,
+                evidence_type=candidate["evidence_type"], evidence_ref=candidate["evidence_ref"],
+                reason=reason, request_id=request_id,
+            )
+            await db.commit()
+        return {"candidate": after, "binding": binding}
 
     # ---------------------------------------------------------------- 变更预览
     async def preview_impact(

@@ -296,6 +296,95 @@ class LivingMemoryPlugin(Star):
             reviewer=reviewer, reason=reason, request_id=request_id,
         )
 
+    # ---------------------------------------------------------- 绑定管理（阶段 3）
+    async def list_binding_records(
+        self,
+        *,
+        person_id: str = "",
+        platform: str = "",
+        account_id: str = "",
+        status: str = "",
+        include_history: bool = False,
+    ) -> list[dict]:
+        """页面绑定列表：按人物/平台/账号/状态筛选。"""
+        store = getattr(self.initializer, "identity_store", None)
+        if store is None:
+            return []
+        return await store.list_bindings(
+            person_id=person_id, platform=platform, account_id=account_id,
+            status=status, include_history=include_history,
+        )
+
+    async def binding_audit_records(
+        self, *, binding_id: str = "", action: str = "", limit: int = 100, offset: int = 0
+    ) -> list[dict]:
+        store = getattr(self.initializer, "identity_store", None)
+        if store is None:
+            return []
+        return await store.list_audit(
+            binding_id=binding_id, action=action, limit=limit, offset=offset,
+        )
+
+    async def revoke_binding_change(
+        self, binding_id: str, *, operator: str = "", reviewer: str = "",
+        reason: str = "", request_id: str = "",
+    ) -> bool:
+        """单条撤销：软失效并留审计，不删除绑定历史。"""
+        store = getattr(self.initializer, "identity_store", None)
+        if store is None:
+            raise RuntimeError("IdentityStore 未初始化")
+        return await store.revoke_binding(
+            binding_id, operator=operator, reviewer=reviewer,
+            reason=reason, channel="page", request_id=request_id,
+        )
+
+    async def submit_binding_candidate(self, **kwargs) -> dict:
+        """供自动识别链路投递候选；默认进入待审队列，不直接改正式绑定。"""
+        store = getattr(self.initializer, "identity_store", None)
+        if store is None:
+            raise RuntimeError("IdentityStore 未初始化")
+        return await store.submit_candidate(**kwargs)
+
+    async def list_binding_candidates(
+        self, *, status: str = "pending", platform: str = "", person_id: str = "", limit: int = 100
+    ) -> list[dict]:
+        store = getattr(self.initializer, "identity_store", None)
+        if store is None:
+            return []
+        return await store.list_candidates(
+            status=status, platform=platform, person_id=person_id, limit=limit,
+        )
+
+    async def review_binding_candidate(
+        self, candidate_id: str, *, approve: bool, reviewer: str = "",
+        reason: str = "", request_id: str = "",
+    ) -> dict | None:
+        store = getattr(self.initializer, "identity_store", None)
+        if store is None:
+            raise RuntimeError("IdentityStore 未初始化")
+        return await store.review_candidate(
+            candidate_id, approve=approve, reviewer=reviewer,
+            reason=reason, channel="page", request_id=request_id,
+        )
+
+    async def get_binding_settings(self) -> dict:
+        store = getattr(self.initializer, "identity_store", None)
+        if store is None:
+            return {"auto_approve": False, "auto_approve_reason": "", "risk_notice": ""}
+        return await store.get_settings()
+
+    async def set_binding_auto_approve(
+        self, enabled: bool, *, reason: str = "", operator: str = "",
+        reviewer: str = "", risk_ack: bool = False, request_id: str = "",
+    ) -> dict:
+        store = getattr(self.initializer, "identity_store", None)
+        if store is None:
+            raise RuntimeError("IdentityStore 未初始化")
+        return await store.set_auto_approve(
+            enabled, reason=reason, operator=operator, reviewer=reviewer,
+            risk_ack=risk_ack, channel="page", request_id=request_id,
+        )
+
     def _create_tracked_task(self, coro) -> asyncio.Task:
         """创建并跟踪后台任务"""
         task = asyncio.create_task(coro)
