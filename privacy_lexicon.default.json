@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "description": "LivingMemory 默认敏感词表。首次运行时复制到数据目录的 privacy_lexicon.json，可直接编辑并热加载；也可通过 LIVINGMEMORY_PRIVACY_LEXICON 指定路径。每条规则包含分组、等级(0-3)、mask_policy 与替换泛称。",
+  "categories": [
+    {
+      "name": "id_document",
+      "policy": "id",
+      "sensitivity": 3,
+      "replacement": "证件信息",
+      "keywords": ["身份证", "身份证号", "证件号", "护照号", "户口本", "户口簿", "社保号", "社保卡号", "学籍号", "居住证"],
+      "patterns": ["(身份证|证件)(号)?[：: ]*[\\dXx]{6,18}"]
+    },
+    {
+      "name": "vehicle_plate",
+      "policy": "plate",
+      "sensitivity": 2,
+      "replacement": "一辆车",
+      "keywords": ["车牌号", "车牌", "牌照"],
+      "patterns": ["(车牌|牌照)[：: ]*[\\u4e00-\\u9fa5A-Za-z0-9]{5,8}"]
+    },
+    {
+      "name": "account_credential",
+      "policy": "account",
+      "sensitivity": 3,
+      "replacement": "账号密码",
+      "keywords": ["密码", "登录密码", "支付密码", "验证码", "动态码", "私钥", "密钥", "助记词", "token", "cookie", "cookies"],
+      "patterns": []
+    },
+    {
+      "name": "bank_account",
+      "policy": "account",
+      "sensitivity": 3,
+      "replacement": "那张卡",
+      "keywords": ["银行卡", "银行卡号", "信用卡", "信用卡号", "卡号", "开户行"],
+      "patterns": ["(银行卡|卡号)[：: ]*\\d{6,20}"]
+    },
+    {
+      "name": "account_identifier",
+      "policy": "account",
+      "sensitivity": 2,
+      "replacement": "那个账号",
+      "keywords": ["微信号", "QQ号", "微博号", "抖音号", "快手号", "小红书号", "账号ID", "UID"],
+      "patterns": ["(QQ|微信)(号)?[：: ]*[\\w-]{5,20}", "\\bUID[：: ]*\\d{4,}"]
+    },
+    {
+      "name": "address",
+      "policy": "address",
+      "sensitivity": 2,
+      "replacement": "家附近",
+      "keywords": ["住址", "家庭住址", "门牌号", "小区", "单元楼", "出租屋", "宿舍楼"],
+      "patterns": ["[\\u4e00-\\u9fa5]{1,2}[省市]?[\\u4e00-\\u9fa5]{2,8}(小区|花园|公寓)"]
+    },
+    {
+      "name": "contact",
+      "policy": "contact",
+      "sensitivity": 2,
+      "replacement": "联系方式",
+      "keywords": ["手机号", "手机号码", "电话号码", "联系电话", "邮箱", "电子邮箱"],
+      "patterns": ["1[3-9]\\d{9}", "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"]
+    },
+    {
+      "name": "amount",
+      "policy": "amount",
+      "sensitivity": 2,
+      "replacement": "不少钱",
+      "keywords": ["金额", "转账", "红包", "账单"],
+      "patterns": ["\\d{3,}[\\d,]*\\s*元", "\\d+(\\.\\d+)?\\s*万"]
+    },
+    {
+      "name": "finance_debt",
+      "policy": "finance",
+      "sensitivity": 3,
+      "replacement": "一笔债务",
+      "keywords": ["欠债", "欠款", "网贷", "贷款", "负债", "债务", "高利贷", "催收", "借钱不还", "花呗欠款", "信用卡欠款", "房贷", "车贷"],
+      "patterns": []
+    },
+    {
+      "name": "finance_income",
+      "policy": "finance",
+      "sensitivity": 2,
+      "replacement": "收入情况",
+      "keywords": ["工资", "薪水", "存款", "余额", "理财", "基金", "股票", "分红", "年终奖", "工资条"],
+      "patterns": []
+    },
+    {
+      "name": "health",
+      "policy": "health",
+      "sensitivity": 3,
+      "replacement": "身体情况",
+      "keywords": ["病史", "病历", "诊断", "病情", "肿瘤", "癌症", "化疗", "放疗", "手术", "住院", "流产", "抑郁", "焦虑", "抑郁症", "焦虑症", "双相", "精神科", "自杀", "自残", "艾滋", "HIV", "传染病", "体检报告", "处方"],
+      "patterns": []
+    },
+    {
+      "name": "love_relationship",
+      "policy": "love",
+      "sensitivity": 2,
+      "replacement": "一段感情",
+      "keywords": ["恋爱", "男朋友", "女朋友", "谈对象", "找对象", "前任", "分手", "表白", "暗恋", "暧昧", "约会", "异地恋", "复合", "网恋", "相亲"],
+      "patterns": []
+    },
+    {
+      "name": "love_secret",
+      "policy": "love",
+      "sensitivity": 3,
+      "replacement": "感情私事",
+      "keywords": ["出轨", "偷情", "小三", "情人", "包养", "约炮", "一夜情", "三角恋"],
+      "patterns": []
+    },
+    {
+      "name": "sexuality",
+      "policy": "love",
+      "sensitivity": 3,
+      "replacement": "个人取向",
+      "keywords": ["性取向", "同性恋", "异性恋", "双性恋", "跨性别", "出柜", "变性"],
+      "patterns": []
+    },
+    {
+      "name": "marriage_status",
+      "policy": "family",
+      "sensitivity": 2,
+      "replacement": "婚姻状况",
+      "keywords": ["结婚", "婚姻", "已婚", "未婚", "老公", "老婆", "夫妻", "婚礼", "彩礼"],
+      "patterns": []
+    },
+    {
+      "name": "marriage_break",
+      "policy": "family",
+      "sensitivity": 3,
+      "replacement": "婚姻变故",
+      "keywords": ["离婚", "离异", "复婚", "分居", "抚养权"],
+      "patterns": []
+    },
+    {
+      "name": "family_relation",
+      "policy": "family",
+      "sensitivity": 2,
+      "replacement": "家里人",
+      "keywords": [],
+      "patterns": ["([\\u4e00-\\u9fa5]{1,2})的(爸爸|妈妈|老公|老婆|儿子|女儿|父亲|母亲|哥哥|姐姐|弟弟|妹妹)"]
+    },
+    {
+      "name": "family_conflict",
+      "policy": "family",
+      "sensitivity": 3,
+      "replacement": "家庭矛盾",
+      "keywords": ["家庭矛盾", "家暴", "婆媳矛盾", "婆媳", "亲子矛盾", "父母吵架", "遗产", "遗产纠纷", "赡养", "虐待", "冷暴力", "断绝关系"],
+      "patterns": []
+    },
+    {
+      "name": "workplace_relation",
+      "policy": "workplace",
+      "sensitivity": 2,
+      "replacement": "工作上的事",
+      "keywords": ["裁员", "离职", "辞职", "被开除", "跳槽", "降薪", "调岗", "绩效", "晋升", "职场霸凌", "办公室政治", "人事纠纷", "同事矛盾", "被排挤", "领导针对", "竞业协议"],
+      "patterns": []
+    },
+    {
+      "name": "workplace_org",
+      "policy": "workplace",
+      "sensitivity": 2,
+      "replacement": "工作单位",
+      "keywords": ["公司名", "单位名称", "工作单位", "所在公司", "工牌", "工号"],
+      "patterns": []
+    },
+    {
+      "name": "belief",
+      "policy": "belief",
+      "sensitivity": 3,
+      "replacement": "个人信仰",
+      "keywords": ["宗教信仰", "信教", "皈依", "教徒", "教会", "清真寺", "佛堂", "诵经", "祷告", "受洗"],
+      "patterns": []
+    },
+    {
+      "name": "politics",
+      "policy": "politics",
+      "sensitivity": 3,
+      "replacement": "个人立场",
+      "keywords": ["政治倾向", "政治立场", "党派", "选举", "抗议", "游行", "示威", "入党", "政治面貌", "政见"],
+      "patterns": []
+    },
+    {
+      "name": "schedule",
+      "policy": "workplace",
+      "sensitivity": 1,
+      "replacement": "临时安排",
+      "keywords": ["加班", "出差", "这周", "本周", "明天", "后天", "临时", "行程", "请假", "面试"],
+      "patterns": []
+    }
+  ]
+}
