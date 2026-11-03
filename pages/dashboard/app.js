@@ -11,6 +11,7 @@ import {
   SystemPage,
   PromptPage,
   SettingsPage,
+  KnowledgePage,
   esc,
 } from "./modules/index.js";
 
@@ -54,6 +55,7 @@ import {
   const systemPage = new SystemPage(state, api);
   const promptPage = new PromptPage(state, api);
   const settingsPage = new SettingsPage(state, api);
+  const knowledgePage = new KnowledgePage(state, api);
 
   function hydrateIcons() {
     if (!window.lucide || typeof window.lucide.createIcons !== "function") return;
@@ -105,14 +107,16 @@ import {
   let pageInitialized = false;
   async function switchPage(name) {
     if (pageInitialized && name === state.page) return;
-    if (memoryPage._bulkBusy || memoryPage._transferBusy) {
+    if (memoryPage._bulkBusy || memoryPage._transferBusy || knowledgePage.busy) {
       showToast(window.t("flow.waitForSave"));
       return;
     }
     const generation = ++navigationGeneration;
+    if (state.page === "knowledge" && !await knowledgePage.canLeave()) return;
     if (state.page === "prompts" && !await promptPage.canLeave()) return;
     if (!await peekPanel.requestClose() || generation !== navigationGeneration) return;
     if (state.page === "prompts") await promptPage.closeEditor({ force: true });
+    if (state.page === "knowledge") knowledgePage.leave();
     pageInitialized = true;
     state.page = name;
 
@@ -136,6 +140,7 @@ import {
     if (name === "system") systemPage.fetch();
     if (name === "prompts") promptPage.fetch();
     if (name === "settings") settingsPage.fetch();
+    if (name === "knowledge") knowledgePage.fetch();
   }
 
   function normalizeLocale(locale) {
@@ -284,6 +289,7 @@ import {
     memoryPage.initEventListeners();
     recallPage.initEventListeners();
     systemPage.initEventListeners();
+    knowledgePage.initEventListeners();
     document.getElementById("prompt-retry")?.addEventListener("click", () => promptPage.fetch());
 
     document.getElementById("peek-close").addEventListener("click", () => peekPanel.requestClose());
@@ -298,7 +304,7 @@ import {
       }
     });
     window.addEventListener("beforeunload", event => {
-      if (promptPage.hasUnsavedChanges() || peekPanel.hasUnsavedChanges() || memoryPage._bulkBusy || memoryPage._transferBusy) {
+      if (promptPage.hasUnsavedChanges() || knowledgePage.hasUnsavedChanges() || knowledgePage.busy || peekPanel.hasUnsavedChanges() || memoryPage._bulkBusy || memoryPage._transferBusy) {
         event.preventDefault();
         event.returnValue = "";
       }

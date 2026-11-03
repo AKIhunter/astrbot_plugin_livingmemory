@@ -25,6 +25,7 @@ test("app waits for the graph DOM initializer before contacting a ready Bridge",
     SystemPage: PageStub,
     PromptPage: PageStub,
     SettingsPage: PageStub,
+    KnowledgePage: PageStub,
     esc() {}, statusPill() {}, nodeBadge() {},
     window: { matchMedia: () => ({ matches: true }), LMAppearance: { init() {} } },
     document: {

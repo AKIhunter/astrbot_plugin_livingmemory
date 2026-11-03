@@ -132,6 +132,13 @@ class ConfigManager:
                 target = child
             target[parts[-1]] = value
 
+        if any(str(path).startswith("unified_context.") for path in updates):
+            from ..unified_context import parse_bindings
+
+            policy = candidate.get("unified_context", {})
+            if not isinstance(policy, dict) or type(policy.get("enabled", False)) is not bool:
+                raise ValueError("统一检索开关必须是布尔值")
+            parse_bindings(policy.get("bindings_json", "[]"))
         merged = merge_config_with_defaults(candidate)
         normalized, _ = normalize_config(merged)
         validate_config(normalized)

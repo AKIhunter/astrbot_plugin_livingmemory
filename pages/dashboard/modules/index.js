@@ -9,4 +9,5 @@ export { RecallPage } from "./recall-page.js";
 export { SystemPage } from "./system-page.js";
 export { PromptPage } from "./prompt-page.js";
 export { SettingsPage } from "./settings-page.js";
+export { KnowledgePage } from "./knowledge-page.js";
 export * from "./utils.js";

@@ -11,6 +11,25 @@
         ],
         "default": "zh"
     },
+    "unified_context": {
+        "invisible": true,
+        "description": "资料库与记忆统一检索",
+        "type": "object",
+        "items": {
+            "enabled": {
+                "type": "bool",
+                "description": "启用授权检索",
+                "hint": "默认关闭。仅明确授权的插件、用途和人格可读；公开评论不会读取主人私聊记忆。",
+                "default": false
+            },
+            "bindings_json": {
+                "type": "text",
+                "description": "检索授权列表（JSON）",
+                "hint": "每项填写 caller、purpose、persona_id、kb_ids。purpose=public_comment 时禁止 session_id；purpose=session 时必须精确填写 session_id。资料库按 UUID 授权，同名重建不继承权限。授权整库代表其中所有文档及后续更新均可用于该用途。",
+                "default": "[]"
+            }
+        }
+    },
     "access_control": {
         "invisible": true,
         "description": "记忆访问控制",

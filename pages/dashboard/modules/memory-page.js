@@ -4,6 +4,7 @@
  */
 
 import { normalizeImportance, esc, statusPill, typeLabel, originLabel } from "./utils.js";
+import { imageStrip, bindImageErrors } from "./comment-images.js";
 
 export class MemoryPage {
   constructor(state, apiClient, peekPanel) {
@@ -225,7 +226,7 @@ export class MemoryPage {
         : "";
       const lowQuality = item.summary_quality === "low";
       const originTag = '<span class="origin-tag' + (lowQuality ? " is-low" : "") + '"' + (lowQuality ? ' title="' + esc(window.t("detail.qualityLow")) + '"' : "") + '>' + esc(originLabel(item.origin)) + '</span>';
-      html += '<td class="cell-summary"><div class="memory-summary-line">' + consBadge + '<button class="memory-open memory-summary-text" type="button" aria-label="' + esc(window.t("table.openMemory", item.memory_id)) + '">' + esc(item.summary || "") + '</button></div><div class="memory-summary-meta">' + originTag + '<span>' + esc(window.t("table.updated", item.updated_at || "--")) + '</span></div></td>';
+      html += '<td class="cell-summary"><div class="memory-summary-with-image">' + imageStrip(item.raw?.metadata, true) + '<div class="memory-summary-copy"><div class="memory-summary-line">' + consBadge + '<button class="memory-open memory-summary-text" type="button" aria-label="' + esc(window.t("table.openMemory", item.memory_id)) + '">' + esc(item.summary || "") + '</button></div><div class="memory-summary-meta">' + originTag + '<span>' + esc(window.t("table.updated", item.updated_at || "--")) + '</span></div></div></div></td>';
       html += '<td class="cell-type"><span class="type-tag">' + esc(typeLabel(item.memory_type)) + '</span></td>';
       html += '<td class="cell-importance"><div class="importance-bar"><div class="importance-bar-track">';
       html += '<div class="importance-bar-fill ' + impCls + '" style="width:' + (impNum * 10) + '%"></div></div>';
@@ -236,6 +237,7 @@ export class MemoryPage {
     }
 
     tbody.innerHTML = html + spacerRow(padBottom);
+    bindImageErrors(tbody);
     tbody.style.paddingTop = "0";
     tbody.style.paddingBottom = "0";
     this._measureRowHeight(tbody, rowHeight);

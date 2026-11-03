@@ -21,7 +21,8 @@ LOCALE_DIR = PLUGIN_ROOT / ".astrbot-plugin" / "i18n"
 LANG_TO_LOCALE = {"zh": "zh-CN", "en": "en-US", "ru": "ru-RU", "ja": "ja-JP"}
 
 # Providers and reply language stay on the host configuration page.
-HOST_CONFIG_GROUPS = {"provider_settings", "bot_language"}
+# 统一检索授权在专页使用版本校验保存，不能从普通设置绕过并发保护。
+HOST_CONFIG_GROUPS = {"provider_settings", "bot_language", "unified_context"}
 
 _SLIDER_KEYS = ("min", "max", "step")
 

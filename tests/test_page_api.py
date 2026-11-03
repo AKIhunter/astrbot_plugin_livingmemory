@@ -1241,10 +1241,12 @@ class TestRouteRegistration:
         plugin = FakePlugin()
         api = PluginPageApi(plugin)
         api.register_routes()
-        assert len(plugin._api_routes) == 22
+        assert len(plugin._api_routes) == 27
 
         paths = {route for route, _, _, _ in plugin._api_routes}
         prefix = PAGE_API_PREFIX
+        for endpoint in ("catalog", "documents", "preview", "policy", "test"):
+            assert f"{prefix}/knowledge/{endpoint}" in paths
         assert f"{prefix}/stats" in paths
         assert f"{prefix}/memories" in paths
         assert f"{prefix}/memories/update" in paths

@@ -31,6 +31,10 @@
             <i data-lucide="scan-search" aria-hidden="true"></i>
             <span data-i18n="nav.recall">Recall Test</span>
           </button>
+          <button class="nav-item" data-page="knowledge" data-i18n-aria="nav.knowledge">
+            <i data-lucide="database" aria-hidden="true"></i>
+            <span data-i18n="nav.knowledge">资料与授权</span>
+          </button>
           <button class="nav-item" data-page="system" data-i18n-aria="nav.system">
             <i data-lucide="chart-no-axes-combined" aria-hidden="true"></i>
             <span data-i18n="nav.system">System</span>
@@ -67,6 +71,45 @@
 
       <!-- Main Content -->
       <main class="main-content">
+        <section class="page" id="page-knowledge">
+          <header class="page-header">
+            <div class="page-heading"><span class="page-index">07</span><span class="page-title" data-i18n="nav.knowledge">资料与授权</span></div>
+            <button id="kb-refresh" class="btn btn-secondary btn-sm" data-i18n="common.refresh">刷新</button>
+          </header>
+          <div class="page-body kb-page-body">
+            <p data-i18n="kb.boundary">管理员可查看全部资料；机器人只能查询已授权资料库。公开评论不会读取 LivingMemory 私聊经历。</p>
+            <p data-i18n="kb.maintenance">上传、替换、删除文档请使用 AstrBot「知识库」；这里直接读取同一份资料及索引。</p>
+            <div id="kb-feedback" class="request-feedback" role="status" aria-live="polite"></div>
+            <div id="kb-catalog" class="kb-grid"></div>
+            <div class="kb-grid">
+              <section id="kb-documents" aria-live="polite"></section>
+              <section id="kb-preview" aria-live="polite"></section>
+            </div>
+            <details class="kb-card">
+              <summary data-i18n="kb.authorization">查询授权</summary>
+              <p data-i18n="kb.wholeLibrary">整库授权包含现有文档和后续更新。请把私密资料放在未公开授权的独立库中。</p>
+              <p data-i18n="kb.policyHelp">caller 填调用插件名，purpose 填 public_comment 或 session，persona_id 填实际人格，kb_ids 填上方资料库 ID。session 用途还必须填写精确 session_id；公开用途留空。</p>
+              <fieldset id="kb-policy">
+                <label><input type="checkbox" id="kb-enabled" /> <span data-i18n="kb.enable">启用统一检索</span></label>
+                <label for="kb-bindings" data-i18n="kb.bindings">授权规则（JSON；空数组 [] 表示不授权）</label>
+                <textarea id="kb-bindings" class="input" rows="12" maxlength="20000" spellcheck="false"></textarea>
+              </fieldset>
+              <button id="kb-save" class="btn btn-primary" disabled data-i18n="kb.save">保存授权并立即生效</button>
+            </details>
+            <section class="kb-card">
+              <h3 data-i18n="kb.testTitle">按已保存授权试查</h3>
+              <p data-i18n="kb.testHint">只检索，不生成或发送评论。会调用向量服务；若资料库配置了重排，也会调用重排服务。</p>
+              <form id="kb-test-form" class="kb-test-form">
+                <label for="kb-identity" data-i18n="kb.identity">查询身份</label>
+                <select id="kb-identity" class="input"></select>
+                <label for="kb-query" data-i18n="kb.query">查询内容</label>
+                <textarea id="kb-query" class="input" maxlength="1200" rows="3" required></textarea>
+                <button id="kb-test" class="btn btn-primary" type="submit" disabled data-i18n="kb.test">试查</button>
+              </form>
+              <div id="kb-results" aria-live="polite"></div>
+            </section>
+          </div>
+        </section>
 
         <!-- Page: Graph -->
         <section class="page active" id="page-graph">

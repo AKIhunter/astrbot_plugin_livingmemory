@@ -372,6 +372,39 @@ class MemoryEngineCrudMixin:
 
         return await asyncio.to_thread(_compute_keys)
 
+    async def search_memories_scoped(
+        self, query: str, *, session_id: str, persona_id: str, k: int = 4,
+    ) -> list[dict]:
+        """统一入口专用：精确双重隔离，不迁移旧会话、不补全近期记忆、不缓存正文。"""
+        if not query.strip() or not session_id or not persona_id:
+            raise ValueError("检索必须指定会话和人格")
+        if session_id.startswith("livingmemory:") or "*" in session_id or "*" in persona_id:
+            raise ValueError("统一检索不支持合并范围")
+        if self.hybrid_retriever is None:
+            raise RuntimeError("检索器未就绪")
+        results = await self.hybrid_retriever.search(
+            query, max(1, min(k, 4)), session_id, persona_id
+        )
+        checked = []
+        for result in results:
+            row = await self.get_memory(result.doc_id)
+            if not row:
+                continue
+            md = safe_json_dict(row.get("metadata"))
+            if (
+                md.get("session_id") != session_id
+                or md.get("persona_id") != persona_id
+                or md.get("status") != "active"
+                or row.get("text") != result.content
+            ):
+                continue
+            checked.append(replace(result, metadata=md))
+        checked = self._filter_by_retrieval_policy(await self._apply_atom_policy(checked))
+        return [
+            {"source": "experience", "memory_id": r.doc_id, "content": r.content}
+            for r in checked[:max(1, min(k, 4))]
+        ]
+
     async def search_memories(
         self,
         query: str,

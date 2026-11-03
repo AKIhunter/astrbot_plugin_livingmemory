@@ -15,6 +15,7 @@ import {
   originLabel,
   confirmDiscardChanges
 } from "./utils.js";
+import { imageStrip, bindImageErrors } from "./comment-images.js";
 
 // Cached details use the UI's 0-10 scale; converting a low display score again
 // would turn 1/10 into 10/10 during rendering or an otherwise unchanged save.
@@ -251,6 +252,8 @@ export class PeekPanel {
     // 内容区域
     html += '<div class="peek-section"><div class="peek-section-title">' + window.t("detail.content") + '</div>';
     html += '<div class="memory-detail-content" id="detail-content-display">' + esc(content) + '</div></div>';
+    const images = imageStrip(meta);
+    if (images) html += '<div class="peek-section"><div class="peek-section-title">评论配图</div>' + images + '</div>';
 
     if (memorizeReason) {
       html += '<div class="peek-section"><div class="peek-section-title">' + window.t("detail.memorizeReason") + '</div>';
@@ -327,6 +330,7 @@ export class PeekPanel {
 
     const peekBody = document.getElementById("peek-body");
     peekBody.innerHTML = html;
+    bindImageErrors(peekBody);
     if (window.lmHydrateIcons) window.lmHydrateIcons();
     peekBody.scrollTop = 0;
 

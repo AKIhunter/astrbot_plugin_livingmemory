@@ -469,6 +469,10 @@ class LivingMemoryConfig(BaseModel):
     shared_embedding_cache: SharedEmbeddingCacheConfig = Field(
         default_factory=SharedEmbeddingCacheConfig
     )
+    # 运行时单独严格校验授权，损坏的授权只关闭统一检索，不重置其他插件配置。
+    unified_context: Any = Field(
+        default_factory=lambda: {"enabled": False, "bindings_json": "[]"}
+    )
     migration_settings: MigrationSettings = Field(default_factory=MigrationSettings)
     index_rebuild_settings: IndexRebuildSettings = Field(
         default_factory=IndexRebuildSettings

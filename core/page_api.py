@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .page_api_modules.knowledge_handler import KnowledgeHandler
 from .page_api_modules import (
     BackupHandler,
     ConsolidationHandler,
@@ -44,6 +45,7 @@ class PluginPageApi:
         self.prompt_handler = PromptHandler(self.utils, plugin)
         self.consolidation_handler = ConsolidationHandler(self.utils)
         self.settings_handler = SettingsHandler(self.utils, plugin)
+        self.knowledge_handler = KnowledgeHandler(self.utils, plugin)
 
         # BackupHandler 需要 data_dir，延迟初始化
         self._backup_handler = None
@@ -61,6 +63,14 @@ class PluginPageApi:
     def register_routes(self) -> None:
         """注册官方插件页面所需的原生 API。"""
         register = self.plugin.context.register_web_api
+        for path, handler, method in (
+            ("knowledge/catalog", self.knowledge_handler.catalog, "GET"),
+            ("knowledge/documents", self.knowledge_handler.documents, "GET"),
+            ("knowledge/preview", self.knowledge_handler.preview, "GET"),
+            ("knowledge/policy", self.knowledge_handler.save_policy, "POST"),
+            ("knowledge/test", self.knowledge_handler.test, "POST"),
+        ):
+            register(f"{PAGE_API_PREFIX}/{path}", handler, [method], "LivingMemory knowledge admin")
         register(
             f"{PAGE_API_PREFIX}/stats",
             self.get_stats,

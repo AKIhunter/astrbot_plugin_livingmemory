@@ -22,6 +22,7 @@ from .core.i18n_backend import init as i18n_init
 from .core.i18n_backend import t
 from .core.managers.backup_manager import BackupManager
 from .core.page_api import PluginPageApi
+from .core.unified_context import UnifiedContextService
 from .core.passive_group_capture import (
     PassiveGroupCaptureFilter,
     get_active_plugin,
@@ -127,12 +128,23 @@ class LivingMemoryPlugin(Star):
         self._llm_tools_registered = False
         self._terminating = False
 
+        self.unified_context = UnifiedContextService(self)
         self.page_api = PluginPageApi(self)
         self.page_api.register_routes()
         set_active_plugin(self)
 
         # 启动非阻塞的初始化任务
         self._create_tracked_task(self._initialize_plugin())
+
+    async def search_context(
+        self, query: str, *, caller: str, purpose: str,
+        persona_id: str, session_id: str = "",
+    ) -> dict:
+        """授权插件的统一只读检索入口；不得直接暴露给模型或匿名请求。"""
+        return await self.unified_context.search(
+            query, caller=caller, purpose=purpose,
+            persona_id=persona_id, session_id=session_id,
+        )
 
     def _create_tracked_task(self, coro) -> asyncio.Task:
         """创建并跟踪后台任务"""

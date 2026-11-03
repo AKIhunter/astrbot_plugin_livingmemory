@@ -1,4 +1,36 @@
 /* Operation groups use each appearance's semantic surfaces and radii. */
+/* 缩略图不改变虚拟列表行高；详情展示已发布的公开地址。 */
+.memory-summary-with-image { display:flex; align-items:center; gap:8px; min-width:0; }
+.memory-summary-copy { flex:1; min-width:0; }
+.comment-image-strip { display:flex; flex-wrap:wrap; gap:12px; }
+.comment-image-strip.is-compact { flex:0 0 auto; align-items:center; gap:3px; }
+.comment-image-preview { width:144px; height:120px; display:flex; align-items:center; justify-content:center; border-radius:6px; background:var(--bg-tertiary); overflow:hidden; }
+.is-compact .comment-image-preview { width:40px; height:40px; }
+.comment-image-preview img { width:100%; height:100%; object-fit:contain; }
+.comment-image-fallback { display:none; color:var(--text-secondary); font-size:12px; text-align:center; }
+.comment-image-preview.is-unavailable img { display:none; }
+.comment-image-preview.is-unavailable .comment-image-fallback { display:block; }
+.is-compact .comment-image-fallback { font-size:10px; }
+.comment-image-figure { width:144px; margin:0; }
+.comment-image-figure a:focus-visible { outline:2px solid var(--accent); outline-offset:3px; display:block; }
+.comment-image-figure figcaption { font-size:12px; line-height:1.5; margin-top:6px; overflow-wrap:anywhere; }
+.comment-image-figure small { display:block; color:var(--text-secondary); margin-top:4px; }
+.kb-page-body { overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
+.kb-page-body > p { margin: 0; }
+.kb-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.kb-grid > *, .kb-card { min-width: 0; }
+.kb-card { border: 1px solid var(--border-normal); border-radius: var(--theme-radius); background: var(--bg-card); padding: 16px; }
+.kb-card h3 { margin: 0 0 10px; }
+.kb-card code { display: block; margin: 12px 0; }
+.kb-card p, .kb-card code, .kb-document { overflow-wrap: anywhere; }
+.kb-scope { font-weight: 600; }
+.kb-page-body pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; border-block-start: 1px solid var(--border-normal); padding-block: 12px; }
+.kb-page-body fieldset, .kb-test-form { border: 0; padding: 0; display: grid; gap: 10px; min-width: 0; margin-block: 16px; }
+.kb-page-body textarea, .kb-page-body select { width: 100%; min-width: 0; }
+.kb-page-body summary { cursor: pointer; font-weight: 600; }
+.kb-document { width: 100%; margin-block: 4px; text-align: start; white-space: normal; }
+.kb-pagination { display: flex; gap: 8px; margin-block: 12px; }
+@media (max-width: 900px) { .kb-grid { grid-template-columns: 1fr; } }
 .memory-page-body { overflow-y: auto; }
 .memory-page-body .table-container { min-height: 260px; }
 #memory-filters {
