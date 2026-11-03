@@ -146,6 +146,156 @@ class LivingMemoryPlugin(Star):
             persona_id=persona_id, session_id=session_id,
         )
 
+    async def resolve_identity_context(self, event, persona_id: str = "") -> dict:
+        """阶段 1 统一身份解析入口：事件 → 人物 + 来源账号 + 场景 + 受众。"""
+        from .core.identity import build_identity_context
+
+        return await build_identity_context(
+            self.config_manager, event,
+            getattr(self.initializer, "identity_store", None),
+            persona_id=persona_id,
+        )
+
+    async def search_memories_for_event(
+        self, query: str, event, *, persona_id: str = "", k: int = 4,
+    ) -> list:
+        """供 at_guard/从绫复用的稳定检索入口，避免各自拼接范围。"""
+        identity = await self.resolve_identity_context(event, persona_id=persona_id)
+        engine = getattr(self.initializer, "memory_engine", None)
+        if engine is None:
+            return []
+        return await engine.search_memories_for_identity(
+            query, identity=identity, persona_id=persona_id or None, k=k,
+        )
+
+    # ---------------------------------------------------------- 绑定修正（阶段 1）
+    async def preview_binding_change(
+        self, *, source_account: str = "", person_id: str = "", sample_limit: int = 10,
+    ) -> dict:
+        """变更预览：影响条数、涉及场景、前 N 条样本。只读，不落库。"""
+        store = getattr(self.initializer, "identity_store", None)
+        if store is None:
+            return {"total": 0, "by_audience": {}, "memory_ids": [], "samples": []}
+        return await store.preview_impact(
+            source_account=source_account,
+            person_id=person_id,
+            sample_limit=sample_limit,
+        )
+
+    async def apply_binding_change(
+        self,
+        *,
+        person_id: str,
+        platform: str,
+        account_id: str,
+        display_name: str = "",
+        source: str = "manual",
+        evidence_type: str = "",
+        evidence_ref: str = "",
+        operator: str = "",
+        reviewer: str = "",
+        note: str = "",
+        reason: str = "",
+        channel: str = "manual",
+        file_hash: str = "",
+        request_id: str = "",
+        archive_affected: bool = False,
+    ) -> dict:
+        """改绑定：版本化软失效 + 审计；不重写已有记忆。
+
+        ``archive_affected=True`` 时把该账号命中的记忆批量移入回收站（只改状态），
+        便于人工复核；默认不动记忆，避免误伤。
+        """
+        store = getattr(self.initializer, "identity_store", None)
+        if store is None:
+            raise RuntimeError("IdentityStore 未初始化")
+        before = await store.find_active(platform, account_id)
+        preview = await store.preview_impact(source_account=f"{platform}:{account_id}")
+        archived = 0
+        engine = getattr(self.initializer, "memory_engine", None)
+        if archive_affected and engine is not None and preview.get("memory_ids"):
+            archived = await engine.archive_memories(
+                list(preview["memory_ids"]),
+                audit={
+                    "archive_reason": reason or "绑定变更",
+                    "operator": operator,
+                    "binding_request": request_id,
+                },
+            )
+        binding = await store.upsert_binding(
+            person_id=person_id,
+            platform=platform,
+            account_id=account_id,
+            display_name=display_name,
+            source=source,
+            evidence_type=evidence_type,
+            evidence_ref=evidence_ref,
+            operator=operator,
+            reviewer=reviewer,
+            note=note,
+            channel=channel,
+            reason=reason,
+            file_hash=file_hash,
+            request_id=request_id,
+        )
+        return {
+            "before": before,
+            "binding": binding,
+            "preview": preview,
+            "archived": archived,
+        }
+
+    async def rollback_binding_change(
+        self,
+        binding_id: str,
+        to_version: int,
+        *,
+        restore_memory_ids: list[int] | None = None,
+        operator: str = "",
+        reviewer: str = "",
+        reason: str = "",
+        request_id: str = "",
+    ) -> dict:
+        """回滚绑定版本，并可按需把回收站里的记忆恢复回索引。"""
+        store = getattr(self.initializer, "identity_store", None)
+        if store is None:
+            raise RuntimeError("IdentityStore 未初始化")
+        binding = await store.rollback_binding(
+            binding_id, to_version,
+            operator=operator, reviewer=reviewer, reason=reason,
+            request_id=request_id,
+        )
+        restored = 0
+        engine = getattr(self.initializer, "memory_engine", None)
+        if binding is not None and engine is not None:
+            for memory_id in restore_memory_ids or []:
+                try:
+                    if await engine.restore_memory(int(memory_id)):
+                        restored += 1
+                except Exception as e:
+                    logger.warning(f"[LivingMemory] 恢复记忆 {memory_id} 失败: {e!r}")
+        return {"binding": binding, "restored": restored}
+
+    async def upload_bindings(
+        self,
+        rows: list[dict],
+        *,
+        mode: str = "merge",
+        file_hash: str = "",
+        operator: str = "",
+        reviewer: str = "",
+        reason: str = "上传关联关系",
+        request_id: str = "",
+    ) -> dict:
+        """上传关联关系：默认 merge；冲突行单列待人工审。"""
+        store = getattr(self.initializer, "identity_store", None)
+        if store is None:
+            raise RuntimeError("IdentityStore 未初始化")
+        return await store.merge_upload(
+            rows, mode=mode, file_hash=file_hash, operator=operator,
+            reviewer=reviewer, reason=reason, request_id=request_id,
+        )
+
     def _create_tracked_task(self, coro) -> asyncio.Task:
         """创建并跟踪后台任务"""
         task = asyncio.create_task(coro)
@@ -198,6 +348,7 @@ class LivingMemoryPlugin(Star):
                     memory_processor=self.initializer.memory_processor,  # type: ignore[arg-type]
                     conversation_manager=self.initializer.conversation_manager,  # type: ignore[arg-type]
                     consolidation_manager=self.initializer.consolidation_manager,
+                    identity_store=self.initializer.identity_store,
                 )
 
             # 创建命令处理器（幂等）

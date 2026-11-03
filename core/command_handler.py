@@ -16,6 +16,12 @@ from .i18n_backend import t, t_list
 from .managers.conversation_manager import ConversationManager
 from .managers.memory_engine import MemoryEngine
 from .managers.scope_migrator import ScopeMigrator
+from .identity import (
+    audience_for,
+    normalize_platform,
+    session_ref_for,
+    source_account_for,
+)
 from .memory_scope import (
     GLOBAL_MEMORY_SCOPE,
     is_event_memory_allowed,
@@ -661,6 +667,27 @@ class CommandHandler:
                 "triggered_by": "manual",
             }
             metadata["source_session_id"] = session_id
+
+            # 阶段 1：手动总结同样只挂来源账号与受众；群总结不划给个人。
+            platform = normalize_platform(session_id.split(":", 1)[0].split("_")[0])
+            first_message = history_messages[0] if history_messages else None
+            if is_group_chat:
+                scene_id = str(getattr(first_message, "group_id", "") or "")
+                metadata["source_account"] = ""
+                metadata["visible_to"] = "origin_group"
+            else:
+                scene_id = str(
+                    getattr(first_message, "sender_id", "")
+                    or (session_id.rsplit(":", 1)[-1] if ":" in session_id else "")
+                )
+                metadata["source_account"] = source_account_for(platform, scene_id)
+                metadata["visible_to"] = "self_private"
+            metadata["audience"] = audience_for(
+                "group" if is_group_chat else "private", scene_id
+            )
+            metadata["origin_session_ref"] = session_ref_for(
+                platform, "group" if is_group_chat else "private", scene_id
+            )
 
             await self.memory_engine.add_memory(
                 content=content,

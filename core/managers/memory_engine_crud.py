@@ -5,6 +5,7 @@ MemoryEngine 的 MemoryEngineCrudMixin 拆分模块
 
 import asyncio
 import json
+import os
 import time
 from dataclasses import replace
 from typing import Any
@@ -14,7 +15,9 @@ import aiosqlite
 from astrbot.api import logger
 
 from ...storage.atom_store import AtomStore
+from ..identity import audience_allows
 from ..memory_transfer import memory_import_key
+from ..privacy import apply_privacy
 from ..processors.atom_classifier import classify_atoms
 from ..retrieval.hybrid_retriever import HybridResult
 from ..retrieval.route_execution import search_route
@@ -84,6 +87,17 @@ class MemoryEngineCrudMixin:
             raise ValueError("记忆内容不能为空")
         if self.index_writer is None:
             raise RuntimeError("索引写入器未初始化")
+
+        # 阶段 1：敏感字段在写入前统一落库。等级 >=2 时索引只收泛化文本，
+        # 加密原文只放 metadata，不进入向量库。
+        privacy = apply_privacy(
+            content,
+            dict(metadata or {}),
+            os.path.dirname(str(self.db_path or ".")),
+            audience=str((metadata or {}).get("audience") or ""),
+        )
+        content = privacy.index_text
+        metadata = privacy.metadata
 
         full_metadata = self._build_memory_metadata(
             session_id=session_id,
@@ -537,6 +551,49 @@ class MemoryEngineCrudMixin:
 
         self._set_cached_search_results(cache_key, results)
         return results
+
+    async def search_memories_for_identity(
+        self,
+        query: str,
+        *,
+        identity: dict[str, Any],
+        persona_id: str | None = None,
+        k: int = 4,
+    ) -> list[HybridResult]:
+        """统一身份入口：按 person 范围 + 旧会话 legacy_scopes 双读，再做受众过滤。
+
+        - 每个范围都是具体 scope，不传空值，因此不会退化成全库检索。
+        - 旧记录通过 ``legacy_scopes``（当前 unified_msg_origin）按来源读出。
+        - 私聊事实不会进入群/公开场景：audience_allows 在合并前逐条判断。
+        """
+        if not query or not query.strip() or not isinstance(identity, dict):
+            return []
+        # 阶段 1 回写：同一人物已绑定的其他账号范围也纳入双读（仍逐条过受众过滤）。
+        scopes = [
+            identity.get("scope") or "",
+            *(identity.get("person_scopes") or []),
+            *(identity.get("legacy_scopes") or []),
+        ]
+        scopes = list(dict.fromkeys(scope for scope in scopes if str(scope or "").strip()))
+        if not scopes:
+            return []
+        merged: dict[int, HybridResult] = {}
+        for scope in scopes:
+            results = await self.search_memories(
+                query=query,
+                k=max(1, k * 2),
+                session_id=str(scope),
+                persona_id=persona_id,
+            )
+            for result in results or []:
+                metadata = result.metadata or {}
+                if not audience_allows(metadata, identity):
+                    continue
+                current = merged.get(result.doc_id)
+                if current is None or result.final_score > current.final_score:
+                    merged[result.doc_id] = result
+        ordered = sorted(merged.values(), key=lambda item: item.final_score, reverse=True)
+        return ordered[:max(1, k)]
 
     async def _apply_atom_policy(self, results, skip_doc_ids: set[int] | None = None):
         """Resolve atom-backed recall content from current lifecycle state.

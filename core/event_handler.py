@@ -36,6 +36,7 @@ class EventHandler:
         memory_processor: MemoryProcessor,
         conversation_manager: ConversationManager,
         consolidation_manager=None,
+        identity_store=None,
     ):
         """
         初始化事件处理器
@@ -76,6 +77,7 @@ class EventHandler:
             self._message_utils,
             self._injection_adapter,
             storage_session_tasks=self._storage_session_tasks,
+            identity_store=identity_store,
         )
 
         self._memory_reflection = MemoryReflection(

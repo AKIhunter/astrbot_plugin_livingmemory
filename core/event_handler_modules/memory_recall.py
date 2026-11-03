@@ -14,10 +14,10 @@ from astrbot.api.platform import MessageType
 from astrbot.api.provider import ProviderRequest
 from astrbot.core.agent.message import TextPart
 
+from ..identity import build_identity_context
 from ..memory_scope import (
     is_event_memory_allowed,
     is_suspicious_session_id,
-    resolve_memory_scope,
 )
 from ..utils import (
     OperationContext,
@@ -46,6 +46,7 @@ class MemoryRecall:
         message_utils: "MessageUtils",
         injection_adapter: "InjectionAdapter",
         storage_session_tasks: dict[str, asyncio.Task] | None = None,
+        identity_store=None,
     ):
         """
         初始化记忆召回模块
@@ -64,6 +65,7 @@ class MemoryRecall:
         self.config_manager = config_manager
         self.memory_engine = memory_engine
         self.conversation_manager = conversation_manager
+        self.identity_store = identity_store
         self.message_utils = message_utils
         self.injection_adapter = injection_adapter
         self._storage_session_tasks: dict[str, asyncio.Task] = (
@@ -200,11 +202,7 @@ class MemoryRecall:
                 # 因此不能直接依赖 req.system_prompt 已注入人格，需自行走完整优先级。
                 persona_id = await get_persona_id(self.context, event)
 
-                # 作用域解析失败时回退到原始会话，与写入侧（反思/总结/工具）
-                # 保持一致，确保召回与写入面向同一批会话标记的数据
-                recall_session_id = resolve_memory_scope(
-                    self.config_manager, event
-                ) or session_id
+                # 身份/范围统一由 build_identity_context 解析（person 范围 + 旧会话双读）
                 recall_persona_id = persona_id if use_persona_filtering else None
 
                 # 使用原始用户输入作为召回关键字
@@ -261,11 +259,16 @@ class MemoryRecall:
                     f"[{session_id}] 开始记忆召回，查询='{query_for_search[:80]}...'"
                 )
 
-                recalled_memories = await self.memory_engine.search_memories(
+                recalled_memories = await self.memory_engine.search_memories_for_identity(
                     query=query_for_search,
-                    k=self.config_manager.get("recall_engine.top_k", 5),
-                    session_id=recall_session_id,
+                    identity=await build_identity_context(
+                        self.config_manager,
+                        event,
+                        self.identity_store,
+                        persona_id=persona_id,
+                    ),
                     persona_id=recall_persona_id,
+                    k=self.config_manager.get("recall_engine.top_k", 5),
                 )
 
                 if recalled_memories:

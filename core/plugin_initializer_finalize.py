@@ -83,6 +83,12 @@ class InitializerFinalizeMixin:
             # 初始化数据库迁移管理器
             self.db_migration = DBMigration(str(db_path))
 
+            # 阶段 1：人物绑定/审计表与记忆同库；不改 documents 既有结构。
+            from ..storage.identity_store import IdentityStore
+
+            self.identity_store = IdentityStore(str(db_path))
+            await self.identity_store.initialize()
+
             # 检查并执行数据库迁移
             if self.config_manager.get("migration_settings.auto_migrate", True):
                 await self._check_and_migrate_database()

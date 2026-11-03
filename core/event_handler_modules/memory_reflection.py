@@ -14,6 +14,12 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.api.platform import MessageType
 from astrbot.api.provider import LLMResponse
 
+from ..identity import (
+    audience_for,
+    normalize_platform,
+    session_ref_for,
+    source_account_for,
+)
 from ..memory_scope import (
     is_event_memory_allowed,
     is_suspicious_session_id,
@@ -912,6 +918,30 @@ class MemoryReflection:
                         "message_count": end_index - start_index,
                     }
                     metadata["source_session_id"] = session_id
+
+                    # 阶段 1：记忆行只挂“谁说的”原始账号与受众，不写 person 归属。
+                    # 群总结可能包含多人发言，无法确认归属时留在原群、不划给个人。
+                    platform = normalize_platform(session_id.split(":", 1)[0].split("_")[0])
+                    first_message = history_messages[0] if history_messages else None
+                    if is_group_chat:
+                        scene_id = str(getattr(first_message, "group_id", "") or "")
+                    else:
+                        scene_id = str(
+                            getattr(first_message, "sender_id", "")
+                            or (session_id.rsplit(":", 1)[-1] if ":" in session_id else "")
+                        )
+                    audience = audience_for("group" if is_group_chat else "private", scene_id)
+                    metadata["audience"] = audience
+                    metadata["origin_session_ref"] = session_ref_for(
+                        platform, "group" if is_group_chat else "private", scene_id
+                    )
+                    metadata["source_account"] = (
+                        "" if is_group_chat
+                        else source_account_for(platform, scene_id)
+                    )
+                    metadata["visible_to"] = (
+                        f"origin_group" if is_group_chat else "self_private"
+                    )
 
                     logger.info(
                         f"[{session_id}] 已使用LLM生成结构化记忆, "

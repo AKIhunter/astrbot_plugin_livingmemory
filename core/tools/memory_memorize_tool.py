@@ -13,6 +13,12 @@ from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
 
+from ..identity import (
+    audience_for,
+    normalize_platform,
+    session_ref_for,
+    source_account_for,
+)
 from ..memory_scope import is_event_memory_allowed, resolve_memory_scope
 from ..utils import get_persona_id
 
@@ -153,6 +159,23 @@ class MemoryMemorizeTool(FunctionTool[AstrAgentContext]):
             }
             metadata["memory_origin"] = "agent_memorize_tool"
             metadata["source_session_id"] = session_id
+
+            # 阶段 1：手动写入同样只挂来源账号与受众，不写 person 归属。
+            platform = normalize_platform(event.get_platform_name())
+            if is_group_chat:
+                scene_id = str(event.get_group_id() or "")
+                metadata["source_account"] = ""
+                metadata["visible_to"] = "origin_group"
+            else:
+                scene_id = str(event.get_sender_id() or "")
+                metadata["source_account"] = source_account_for(platform, scene_id)
+                metadata["visible_to"] = "self_private"
+            metadata["audience"] = audience_for(
+                "group" if is_group_chat else "private", scene_id
+            )
+            metadata["origin_session_ref"] = session_ref_for(
+                platform, "group" if is_group_chat else "private", scene_id
+            )
             cleaned_reason = (reason or "").strip()
             if cleaned_reason:
                 metadata["memorize_reason"] = cleaned_reason
