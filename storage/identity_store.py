@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import asynccontextmanager
 from typing import Any
 from uuid import uuid4
 
@@ -131,6 +132,22 @@ class IdentityStore:
     @staticmethod
     def _now() -> float:
         return time.time()
+
+    @asynccontextmanager
+    async def _transaction(self, db: aiosqlite.Connection | None = None):
+        """复用批量操作的事务；独立写入先锁定快照，再读改写并提交审计。"""
+        if db is not None:
+            yield db
+            return
+        async with aiosqlite.connect(self.db_path) as connection:
+            connection.row_factory = aiosqlite.Row
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                yield connection
+                await connection.commit()
+            except BaseException:
+                await connection.rollback()
+                raise
 
     async def initialize(self) -> None:
         async with aiosqlite.connect(self.db_path) as db:
@@ -317,6 +334,8 @@ class IdentityStore:
         reason: str = "",
         file_hash: str = "",
         request_id: str = "",
+        expected_binding: dict[str, Any] | None = None,
+        _db: aiosqlite.Connection | None = None,
     ) -> dict[str, Any]:
         """按 (platform, account_id) 幂等 upsert；人物变化时版本化并保留旧行。"""
         person_id = str(person_id or "").strip()
@@ -326,8 +345,7 @@ class IdentityStore:
             raise ValueError("person_id / platform / account_id 均不能为空")
 
         now = self._now()
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
+        async with self._transaction(_db) as db:
             cursor = await db.execute(
                 """
                 SELECT * FROM person_binding
@@ -338,6 +356,8 @@ class IdentityStore:
             )
             active = await cursor.fetchone()
             active = dict(active) if active else None
+            if expected_binding is not None and (active or {}) != expected_binding:
+                raise ValueError("绑定已变化，请刷新后重新编辑")
 
             if active is None:
                 cursor = await db.execute(
@@ -386,7 +406,6 @@ class IdentityStore:
                     evidence_ref=evidence_ref, file_hash=file_hash,
                     reason=reason, request_id=request_id,
                 )
-                await db.commit()
                 return binding
 
             if str(active["person_id"]) == person_id:
@@ -433,7 +452,6 @@ class IdentityStore:
                     evidence_ref=evidence_ref, file_hash=file_hash,
                     reason=reason, request_id=request_id,
                 )
-                await db.commit()
                 return updated
 
             # 人物归属变化：旧行软失效，插入新版本；历史记忆一行不动。
@@ -490,7 +508,6 @@ class IdentityStore:
                 evidence_ref=evidence_ref, file_hash=file_hash,
                 reason=reason, request_id=request_id,
             )
-            await db.commit()
             return new_binding
 
     async def revoke_binding(
@@ -502,11 +519,12 @@ class IdentityStore:
         reason: str = "",
         channel: str = "manual",
         request_id: str = "",
+        file_hash: str = "",
+        _db: aiosqlite.Connection | None = None,
     ) -> bool:
         """软失效：置 revoked 并写 valid_to，不删除行。"""
         now = self._now()
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
+        async with self._transaction(_db) as db:
             cursor = await db.execute(
                 "SELECT * FROM person_binding WHERE binding_id = ?",
                 (str(binding_id),),
@@ -528,8 +546,8 @@ class IdentityStore:
                 version=int(before["version"]), before=before, after=after,
                 channel=channel, operator_id=operator, operator_name=operator,
                 reviewer_id=reviewer, reason=reason, request_id=request_id,
+                file_hash=file_hash,
             )
-            await db.commit()
             return True
 
     async def rollback_binding(
@@ -544,8 +562,7 @@ class IdentityStore:
         request_id: str = "",
     ) -> dict[str, Any] | None:
         """回滚：读取目标历史版本，新建一版 active，审计记 rollback。"""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
+        async with self._transaction() as db:
             cursor = await db.execute(
                 "SELECT * FROM person_binding WHERE binding_id = ?",
                 (str(binding_id),),
@@ -574,6 +591,11 @@ class IdentityStore:
                 (current["platform"], current["account_id"]),
             )
             max_version = int((await cursor.fetchone())["max_version"] or 0)
+            cursor = await db.execute(
+                "SELECT * FROM person_binding WHERE platform = ? AND account_id = ? AND status = 'active'",
+                (current["platform"], current["account_id"]),
+            )
+            active = await cursor.fetchone()
             now = self._now()
             # 关闭当前 active 行，再插入目标版本的副本（版本号继续递增）。
             await db.execute(
@@ -610,11 +632,10 @@ class IdentityStore:
             )
             await self._append_audit(
                 db, action="rollback", binding_id=restored["binding_id"],
-                version=restored["version"], before=current, after=restored,
+                version=restored["version"], before=dict(active) if active else {}, after=restored,
                 channel=channel, operator_id=operator, operator_name=operator,
                 reviewer_id=reviewer, reason=reason, request_id=request_id,
             )
-            await db.commit()
             return restored
 
     # ---------------------------------------------------------------- 绑定设置
@@ -651,16 +672,18 @@ class IdentityStore:
             raise ValueError("开启 auto_approve 必须写明理由")
         if enabled and not risk_ack:
             raise ValueError("开启 auto_approve 需要确认风险提示")
-        before = await self.get_settings()
-        now = self._now()
-        after = {
-            **before,
-            "auto_approve": bool(enabled),
-            "auto_approve_reason": reason,
-            "updated_by": operator,
-            "updated_at": now,
-        }
-        async with aiosqlite.connect(self.db_path) as db:
+        if type(enabled) is not bool or type(risk_ack) is not bool:
+            raise ValueError("auto_approve / risk_ack 必须是布尔值")
+        async with self._transaction() as db:
+            before = await self.get_settings()
+            now = self._now()
+            after = {
+                **before,
+                "auto_approve": enabled,
+                "auto_approve_reason": reason,
+                "updated_by": operator,
+                "updated_at": now,
+            }
             for key, value in (
                 ("auto_approve", "1" if enabled else "0"),
                 ("auto_approve_reason", reason),
@@ -682,7 +705,6 @@ class IdentityStore:
                 operator_id=operator, operator_name=operator,
                 reviewer_id=reviewer, reason=reason, request_id=request_id,
             )
-            await db.commit()
         return after
 
     # ---------------------------------------------------------------- 待审候选
@@ -709,8 +731,7 @@ class IdentityStore:
         if not person_id or not platform or not account_id:
             raise ValueError("person_id / platform / account_id 均不能为空")
         now = self._now()
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
+        async with self._transaction() as db:
             cursor = await db.execute(
                 """
                 SELECT * FROM binding_candidate
@@ -791,7 +812,6 @@ class IdentityStore:
                 evidence_type=evidence_type, evidence_ref=evidence_ref,
                 reason="自动识别待人工审核", request_id=request_id,
             )
-            await db.commit()
 
         settings = await self.get_settings()
         if settings.get("auto_approve"):
@@ -799,9 +819,14 @@ class IdentityStore:
                 candidate["candidate_id"], approve=True,
                 reviewer="auto_approve",
                 reason=f"auto_approve：{settings.get('auto_approve_reason') or '已开启'}",
-                channel="auto",
+                channel="auto", request_id=request_id,
+                expected_candidate=candidate,
             )
-            return {"candidate": candidate, "auto_approved": True, "binding": (reviewed or {}).get("binding")}
+            return {
+                "candidate": (reviewed or {}).get("candidate", candidate),
+                "auto_approved": bool(reviewed and reviewed.get("binding")),
+                "binding": (reviewed or {}).get("binding"),
+            }
         return {"candidate": candidate, "auto_approved": False}
 
     async def list_candidates(
@@ -831,15 +856,21 @@ class IdentityStore:
         self,
         candidate_id: str,
         *,
-        approve: bool,
+        approve: bool = False,
         reviewer: str = "",
         reason: str = "",
         channel: str = "page",
         request_id: str = "",
+        expected_candidate: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """逐条审核：通过才写正式绑定，驳回只改候选状态，两种都留审计。"""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
+        if type(approve) is not bool:
+            raise ValueError("approve 必须是布尔值")
+        if not str(reviewer or "").strip() or not str(reason or "").strip():
+            raise ValueError("请填写审核人和审核依据")
+        if not isinstance(expected_candidate, dict) or not expected_candidate:
+            raise ValueError("缺少候选完整快照，请刷新后重新审核")
+        async with self._transaction() as db:
             cursor = await db.execute(
                 "SELECT * FROM binding_candidate WHERE candidate_id = ?",
                 (str(candidate_id),),
@@ -848,34 +879,37 @@ class IdentityStore:
             if not row or row["status"] != BINDING_STATUS_PENDING:
                 return None
             candidate = dict(row)
-        now = self._now()
-        binding = None
-        if approve:
-            binding = await self.upsert_binding(
-                person_id=candidate["person_id"],
-                platform=candidate["platform"],
-                account_id=candidate["account_id"],
-                display_name=candidate["display_name"],
-                source=candidate["source"] or "auto",
-                evidence_type=candidate["evidence_type"],
-                evidence_ref=candidate["evidence_ref"],
-                operator=candidate["submitted_by"] or reviewer,
-                reviewer=reviewer,
-                note=candidate["note"],
-                channel=channel,
-                reason=reason or "人工审核通过",
-                request_id=request_id,
-            )
-        status = BINDING_STATUS_APPROVED if approve else BINDING_STATUS_REJECTED
-        after = {
-            **candidate,
-            "status": status,
-            "reviewed_by": reviewer,
-            "review_reason": reason,
-            "reviewed_at": now,
-            "updated_at": now,
-        }
-        async with aiosqlite.connect(self.db_path) as db:
+            # 同一候选 ID 会被自动识别更新；锁内核对人审看到的全部字段。
+            if candidate != expected_candidate:
+                raise ValueError("候选已变化，请刷新后重新审核")
+            now = self._now()
+            binding = None
+            if approve:
+                binding = await self.upsert_binding(
+                    person_id=candidate["person_id"],
+                    platform=candidate["platform"],
+                    account_id=candidate["account_id"],
+                    display_name=candidate["display_name"],
+                    source=candidate["source"] or "auto",
+                    evidence_type=candidate["evidence_type"],
+                    evidence_ref=candidate["evidence_ref"],
+                    operator=candidate["submitted_by"] or reviewer,
+                    reviewer=reviewer,
+                    note=candidate["note"],
+                    channel=channel,
+                    reason=reason,
+                    request_id=request_id,
+                    _db=db,
+                )
+            status = BINDING_STATUS_APPROVED if approve else BINDING_STATUS_REJECTED
+            after = {
+                **candidate,
+                "status": status,
+                "reviewed_by": reviewer,
+                "review_reason": reason,
+                "reviewed_at": now,
+                "updated_at": now,
+            }
             await db.execute(
                 """
                 UPDATE binding_candidate
@@ -893,7 +927,6 @@ class IdentityStore:
                 evidence_type=candidate["evidence_type"], evidence_ref=candidate["evidence_ref"],
                 reason=reason, request_id=request_id,
             )
-            await db.commit()
         return {"candidate": after, "binding": binding}
 
     # ---------------------------------------------------------------- 变更预览
@@ -964,11 +997,12 @@ class IdentityStore:
         reason: str = "上传关联关系",
         channel: str = "upload",
         request_id: str = "",
+        expected_active: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """按 (platform, account_id) 幂等 upsert。
 
         - merge：新增缺失绑定、同人更新显示名；文件中未出现的旧绑定不动。
-        - replace：处理完文件后，撤销未出现的 active 绑定（需调用方先预览确认）。
+        - replace：快照仍匹配且无坏行/冲突时，原子地撤销未出现的 active 绑定。
         - 冲突行（同一账号指向不同人物）不静默覆盖，单列返回待人工审。
         """
         mode = str(mode or "merge").lower()
@@ -979,61 +1013,68 @@ class IdentityStore:
             "conflicts": [], "revoked": 0,
         }
         seen: set[tuple[str, str]] = set()
+        normalized = []
         for index, row in enumerate(rows):
             person_id = str(row.get("person_id") or "").strip()
             platform = str(row.get("platform") or "").strip().lower()
             account_id = str(row.get("account_id") or "").strip()
             if not person_id or not platform or not account_id:
-                result["conflicts"].append({
-                    "row": index + 2, "reason": "缺少 person_id/platform/account_id",
-                })
-                continue
+                raise ValueError(f"第 {index + 1} 行缺少 person_id/platform/account_id")
+            if (platform, account_id) in seen:
+                raise ValueError(f"第 {index + 1} 行账号重复，请合并后重新上传")
             seen.add((platform, account_id))
-            active = await self.find_active(platform, account_id)
-            if active and str(active["person_id"]) != person_id:
-                result["conflicts"].append({
-                    "row": index + 2,
-                    "platform": platform,
-                    "account_id": account_id,
-                    "current_person_id": active["person_id"],
-                    "uploaded_person_id": person_id,
-                    "reason": "同一账号指向不同人物，待人工审",
-                })
-                continue
-            before = active
-            binding = await self.upsert_binding(
-                person_id=person_id,
-                platform=platform,
-                account_id=account_id,
-                display_name=str(row.get("display_name") or ""),
-                source="upload",
-                evidence_type=str(row.get("evidence_type") or ""),
-                evidence_ref=str(row.get("evidence_ref") or ""),
-                operator=operator,
-                reviewer=reviewer,
-                note=str(row.get("note") or ""),
-                channel=channel,
-                reason=reason,
-                file_hash=file_hash,
-                request_id=request_id,
-            )
-            if before is None:
-                result["created"] += 1
-            elif before.get("updated_at") != binding.get("updated_at") and \
-                    before.get("display_name") != binding.get("display_name"):
-                result["updated"] += 1
-            else:
-                result["unchanged"] += 1
+            normalized.append({**row, "person_id": person_id, "platform": platform, "account_id": account_id})
+        if not normalized:
+            raise ValueError("没有可用的绑定行")
 
-        if mode == "replace":
-            for active in await self.list_bindings():
-                key = (str(active["platform"]), str(active["account_id"]))
-                if key in seen:
+        async with self._transaction() as db:
+            cursor = await db.execute("SELECT * FROM person_binding WHERE status = 'active'")
+            active_rows = [dict(row) for row in await cursor.fetchall()]
+            active_map = {(item["platform"], item["account_id"]): item for item in active_rows}
+            if len(active_map) != len(active_rows):
+                raise ValueError("现有绑定存在重复生效账号，请先人工复核")
+            if mode == "replace":
+                ordered = lambda items: sorted(items, key=lambda item: item["binding_id"])
+                if expected_active is None or ordered(expected_active) != ordered(active_rows):
+                    raise ValueError("预览已过期，请重新预览并确认")
+            for index, row in enumerate(normalized):
+                active = active_map.get((row["platform"], row["account_id"]))
+                if active and active["person_id"] != row["person_id"]:
+                    result["conflicts"].append({
+                        "row": index + 1,
+                        "platform": row["platform"],
+                        "account_id": row["account_id"],
+                        "current_person_id": active["person_id"],
+                        "uploaded_person_id": row["person_id"],
+                        "reason": "同一账号指向不同人物，待人工审",
+                    })
+            if mode == "replace" and result["conflicts"]:
+                raise ValueError("replace 含人物冲突，请先手动更正绑定后重新预览")
+            for row in normalized:
+                active = active_map.get((row["platform"], row["account_id"]))
+                if active and active["person_id"] != row["person_id"]:
                     continue
-                if await self.revoke_binding(
-                    str(active["binding_id"]), operator=operator,
-                    reviewer=reviewer, reason="replace 文件中未出现",
-                    channel=channel, request_id=request_id,
-                ):
-                    result["revoked"] += 1
+                binding = await self.upsert_binding(
+                    person_id=row["person_id"], platform=row["platform"], account_id=row["account_id"],
+                    display_name=str(row.get("display_name") or ""), source="upload",
+                    evidence_type=str(row.get("evidence_type") or ""),
+                    evidence_ref=str(row.get("evidence_ref") or ""),
+                    operator=operator, reviewer=reviewer, note=str(row.get("note") or ""),
+                    channel=channel, reason=reason, file_hash=file_hash, request_id=request_id, _db=db,
+                )
+                if active is None:
+                    result["created"] += 1
+                elif active != binding:
+                    result["updated"] += 1
+                else:
+                    result["unchanged"] += 1
+            if mode == "replace":
+                for active in active_rows:
+                    if (active["platform"], active["account_id"]) not in seen:
+                        if await self.revoke_binding(
+                            active["binding_id"], operator=operator, reviewer=reviewer,
+                            reason=reason, channel=channel, request_id=request_id,
+                            file_hash=file_hash, _db=db,
+                        ):
+                            result["revoked"] += 1
         return result

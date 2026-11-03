@@ -150,7 +150,10 @@ class ConversationManager:
         if hasattr(event, "get_message_type"):
             is_group = event.get_message_type() == MessageType.GROUP_MESSAGE
             if is_group:
-                group_id = session_id  # 群聊时session_id即为group_id
+                # UMO 含适配器/消息类型，不能作为群号保存。
+                from ..identity import resolve_scene
+
+                _, group_id = resolve_scene(event)
 
         # 助手消息必须使用 Bot 自身身份，不能继承触发事件中的用户身份。
         is_bot_message = role == "assistant"

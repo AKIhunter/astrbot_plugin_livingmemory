@@ -216,7 +216,8 @@ async def test_text_budget_and_no_sensitive_audit(caplog):
 ])
 @pytest.mark.asyncio
 async def test_experience_rechecks_current_row_scope_and_status(change):
-    metadata = {"session_id": "session", "persona_id": "persona", "status": "active", **change}
+    session_id = "qq:FriendMessage:owner"
+    metadata = {"session_id": session_id, "persona_id": "persona", "status": "active", **change}
     result = HybridResult(
         doc_id=1, content="private", metadata={}, final_score=1, rrf_score=1,
         bm25_score=None, vector_score=None,
@@ -228,14 +229,18 @@ async def test_experience_rechecks_current_row_scope_and_status(change):
         _filter_by_retrieval_policy=lambda rows: rows,
     )
     rows = await MemoryEngineCrudMixin.search_memories_scoped(
-        host, "test", session_id="session", persona_id="persona"
+        host, "test", session_id=session_id, persona_id="persona"
     )
     assert rows == []
 
 
 @pytest.mark.asyncio
-async def test_experience_live_row_is_returned_without_private_metadata():
-    metadata = {"session_id": "session", "persona_id": "persona", "status": "active", "secret": "PRIVATE_METADATA"}
+@pytest.mark.parametrize("session_id,allowed", [
+    ("qq:FriendMessage:owner", True),
+    ("session", False),
+])
+async def test_experience_live_row_is_returned_without_private_metadata(session_id, allowed):
+    metadata = {"session_id": session_id, "persona_id": "persona", "status": "active", "secret": "PRIVATE_METADATA"}
     result = HybridResult(
         doc_id=1, content="content", metadata={}, final_score=1, rrf_score=1,
         bm25_score=None, vector_score=None,
@@ -247,10 +252,11 @@ async def test_experience_live_row_is_returned_without_private_metadata():
         _filter_by_retrieval_policy=lambda rows: rows,
     )
     rows = await MemoryEngineCrudMixin.search_memories_scoped(
-        host, "test", session_id="session", persona_id="persona"
+        host, "test", session_id=session_id, persona_id="persona"
     )
-    assert rows == [{"source": "experience", "memory_id": 1, "content": "content"}]
+    expected = [{"source": "experience", "memory_id": 1, "content": "content"}] if allowed else []
+    assert rows == expected
     host.get_memory.return_value["text"] = "revised"
     assert await MemoryEngineCrudMixin.search_memories_scoped(
-        host, "test", session_id="session", persona_id="persona"
+        host, "test", session_id=session_id, persona_id="persona"
     ) == []

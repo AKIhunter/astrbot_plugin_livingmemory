@@ -924,7 +924,10 @@ class MemoryReflection:
                     platform = normalize_platform(session_id.split(":", 1)[0].split("_")[0])
                     first_message = history_messages[0] if history_messages else None
                     if is_group_chat:
-                        scene_id = str(getattr(first_message, "group_id", "") or "")
+                        from ..identity import parse_session_origin
+
+                        # 已缓冲消息可能仍保存完整 UMO，按来源会话恢复真实群。
+                        _, _, scene_id = parse_session_origin(session_id)
                     else:
                         scene_id = str(
                             getattr(first_message, "sender_id", "")

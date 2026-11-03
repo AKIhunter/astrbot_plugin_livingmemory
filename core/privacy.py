@@ -21,15 +21,23 @@ import re
 import shutil
 import subprocess
 import threading
+from copy import copy
 from dataclasses import dataclass
 from typing import Any
 
 from astrbot.api import logger
 
+from .identity import sensitivity_level
+
 _DEFAULT_LEXICON_FILE = "privacy_lexicon.default.json"
 _RUNTIME_LEXICON_FILE = "privacy_lexicon.json"
 _OVERRIDES_FILE = "privacy_lexicon.overrides.json"
 _PRIVACY_PLACEHOLDER = "[隐私内容]"
+# 图抽取、摘要展示及原子实体使用的文本字段；归属/受众字段不参与替换。
+_INDEX_FIELDS = (
+    "persona_summary", "canonical_summary", "key_facts", "topics", "content_text",
+    "participants", "participant_identities", "entities",
+)
 
 # 词表缓存：key = 数据目录/环境变量路径，value = (指纹, 解析结果)。
 # 指纹包含文件 mtime_ns 与 size，编辑 JSON 后下一次调用即自动重载。
@@ -61,6 +69,7 @@ class _Lexicon:
 class PrivacyResult:
     index_text: str
     metadata: dict[str, Any]
+    atoms: list | None = None
 
 
 # ------------------------------------------------------------------ 密钥与加解密
@@ -91,14 +100,17 @@ def _load_key(data_dir: str) -> str:
         return ""
 
 
-def _openssl(args: list[str], payload: str) -> str:
+def _openssl(args: list[str], payload: str, key: str, *, decrypt: bool = False) -> str:
     try:
         completed = subprocess.run(
-            ["openssl", *args], input=payload, text=True,
+            ["openssl", *args], input=payload.encode("utf-8"),
             capture_output=True, check=True, timeout=10,
+            env={**os.environ, "LIVINGMEMORY_OPENSSL_KEY": key},
         )
-        return completed.stdout.strip()
-    except (OSError, subprocess.SubprocessError) as exc:
+        # 原文的首尾空白属于内容，解密不能 strip；密钥仅经子进程环境传递。
+        output = completed.stdout.decode("utf-8")
+        return output if decrypt else output.strip()
+    except (OSError, UnicodeError, subprocess.SubprocessError) as exc:
         logger.warning(f"[Privacy] openssl 加解密失败，敏感原文将不落库: {exc}")
         return ""
 
@@ -108,8 +120,8 @@ def encrypt_text(text: str, data_dir: str) -> str:
     if not key or not text:
         return ""
     return _openssl(
-        ["enc", "-aes-256-cbc", "-pbkdf2", "-salt", "-a", "-pass", f"file:{_key_path(data_dir)}"],
-        text,
+        ["enc", "-aes-256-cbc", "-pbkdf2", "-salt", "-a", "-pass", "env:LIVINGMEMORY_OPENSSL_KEY"],
+        text, key,
     )
 
 
@@ -117,12 +129,25 @@ def decrypt_text(cipher_text: str, data_dir: str) -> str:
     key = _load_key(data_dir)
     if not key or not cipher_text:
         return ""
-    return _openssl(
-        ["enc", "-d", "-aes-256-cbc", "-pbkdf2", "-a", "-pass", f"file:{_key_path(data_dir)}"],
+    args = ["enc", "-d", "-aes-256-cbc", "-pbkdf2", "-a", "-pass", "env:LIVINGMEMORY_OPENSSL_KEY"]
+    result = _openssl(
+        args,
         # 阶段 2 自测修复：openssl 的 base64 解码要求输入以换行结束，
         # 否则部分长度的密文会报 “error reading input file”。
-        f"{str(cipher_text).strip()}\n",
+        f"{str(cipher_text).strip()}\n", key, decrypt=True,
     )
+    if not result and os.environ.get("LIVINGMEMORY_SECRET_KEY"):
+        # 兼容旧实现：即使设置环境密钥，历史密文仍可能使用数据目录中的文件密钥。
+        try:
+            with open(_key_path(data_dir), encoding="utf-8") as handle:
+                legacy_key = handle.read().strip()
+            if legacy_key and legacy_key != key:
+                result = _openssl(
+                    args, f"{str(cipher_text).strip()}\n", legacy_key, decrypt=True,
+                )
+        except OSError:
+            pass
+    return result
 
 
 # ------------------------------------------------------------------ 词表加载
@@ -501,27 +526,66 @@ def explain_privacy(text: str, data_dir: str = "") -> dict[str, Any]:
     }
 
 
+def restore_private_fields(metadata: dict[str, Any], data_dir: str) -> dict[str, Any]:
+    """仅供写入合并恢复字段原值，不把解密结果送到读取或索引入口。"""
+    restored = dict(metadata)
+    cipher = metadata.get("secret_fields_enc")
+    if cipher:
+        fields = json.loads(decrypt_text(str(cipher), data_dir))
+        if not isinstance(fields, dict):
+            raise ValueError("敏感字段密文格式无效")
+        restored.update({key: value for key, value in fields.items() if key in _INDEX_FIELDS})
+    return restored
+
+
+def _index_fields(metadata: dict[str, Any]) -> dict[str, Any]:
+    return {key: metadata[key] for key in _INDEX_FIELDS if key in metadata}
+
+
+def _generalize_value(lexicon: _Lexicon, value: Any) -> Any:
+    """保留列表/字典形状，避免把结构化事实转换成不可恢复的字符串。"""
+    if isinstance(value, str):
+        general, _ = _generalize_with(lexicon, value)
+        return general if general != value or not value else _PRIVACY_PLACEHOLDER
+    if isinstance(value, list):
+        return [_generalize_value(lexicon, item) for item in value]
+    if isinstance(value, dict):
+        return {key: _generalize_value(lexicon, item) for key, item in value.items()}
+    return value
+
+
 def apply_privacy(
-    content: str,
+    content: str | None,
     metadata: dict[str, Any],
     data_dir: str,
     *,
     audience: str = "",
+    atoms: list | None = None,
 ) -> PrivacyResult:
     """写入前统一处理：补 sensitivity/visible_to/mask_policy/加密原文。
 
-    已显式标记 ``sensitivity`` 的记录以调用方为准；否则用词表分级。
+    词表与父子已有级别取最高值；content=None 用于合并，保留原正文及其密文。
     """
     metadata = dict(metadata or {})
     raw = str(content or "")
     lexicon = load_lexicon(data_dir)
-    try:
-        sensitivity = int(metadata.get("sensitivity") or 0)
-    except (TypeError, ValueError):
-        sensitivity = 0
-    if "sensitivity" not in metadata:
-        sensitivity = _classify_with(lexicon, raw)
-    sensitivity = max(0, min(3, sensitivity))
+    fields = _index_fields(metadata)
+    recall_text = json.dumps(fields, ensure_ascii=False, default=str)
+    atom_levels = []
+    for atom in atoms or []:
+        atom_metadata = dict(getattr(atom, "metadata", None) or {})
+        atom_fields = {**_index_fields(atom_metadata), "entities": atom.entities}
+        atom_levels.append(max(
+            sensitivity_level(atom_metadata),
+            _classify_with(lexicon, str(atom.content or "")),
+            _classify_with(lexicon, json.dumps(atom_fields, ensure_ascii=False, default=str)),
+        ))
+    sensitivity = max(
+        sensitivity_level(metadata),
+        _classify_with(lexicon, raw),
+        _classify_with(lexicon, recall_text),
+        *atom_levels,
+    )
 
     general, policies = _generalize_with(lexicon, raw)
     if sensitivity >= 2 and general == raw:
@@ -542,23 +606,36 @@ def apply_privacy(
     metadata["sensitivity"] = sensitivity
     metadata["visible_to"] = visible_to
     metadata["mask_policy"] = mask_policy
-    metadata["content_text"] = general if sensitivity >= 2 else raw
     metadata["encrypted"] = bool(metadata.get("encrypted", False))
 
     index_text = raw
     if sensitivity >= 2:
-        # 索引只放泛化文本；原文加密后仅留在 metadata，不进向量库。
-        encrypted = str(metadata.get("secret_text_enc") or "")
-        if not encrypted:
+        # 每个实际索引入口只接收泛化载荷；原字段按 JSON 加密，保留类型和顺序。
+        if fields:
+            metadata["secret_fields_enc"] = encrypt_text(
+                json.dumps(fields, ensure_ascii=False), data_dir
+            )
+            metadata.update(_generalize_value(lexicon, fields))
+            metadata["encrypted"] |= bool(metadata["secret_fields_enc"])
+        if content is not None:
+            # 新正文不能复用上一个正文的密文（如 replace_memory 继承了旧 metadata）。
             encrypted = encrypt_text(raw, data_dir)
-        if encrypted:
             metadata["secret_text_enc"] = encrypted
-            metadata["encrypted"] = True
-            index_text = general
-        else:
-            # 没有可用密钥时不落明文，也不把原文送进索引。
-            metadata["secret_text_enc"] = ""
-            metadata["encrypted"] = False
-            index_text = general
-            logger.warning("[Privacy] 敏感记忆未加密（无可用密钥），仅保留泛化文本")
-    return PrivacyResult(index_text=index_text, metadata=metadata)
+            metadata["encrypted"] = bool(encrypted) or bool(metadata.get("secret_fields_enc"))
+            if not encrypted:
+                logger.warning("[Privacy] 敏感记忆未加密（无可用密钥），仅保留泛化文本")
+        index_text = general
+    if content is not None:
+        metadata["content_text"] = index_text
+
+    # 敏感原子用副本，避免合并失败后回退新增时把泛化值当作原文再次加密。
+    # 普通原子保留既有就地更新契约（包含批量失败后的 atom_id 重试判断）。
+    prepared_atoms = [copy(atom) for atom in atoms] if atoms and sensitivity >= 2 else atoms
+    for atom in prepared_atoms or []:
+        atom_metadata = dict(getattr(atom, "metadata", None) or {})
+        atom_metadata.update(sensitivity=sensitivity, entities=atom.entities)
+        protected = apply_privacy(atom.content, atom_metadata, data_dir, audience=audience)
+        atom.content = protected.index_text
+        atom.entities = protected.metadata.pop("entities")
+        atom.metadata = protected.metadata
+    return PrivacyResult(index_text=index_text, metadata=metadata, atoms=prepared_atoms)

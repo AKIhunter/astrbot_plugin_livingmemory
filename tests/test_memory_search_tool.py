@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 import pytest
 
@@ -11,14 +11,17 @@ from astrbot_plugin_livingmemory.core.memory_scope import GLOBAL_MEMORY_SCOPE
 from astrbot_plugin_livingmemory.core.tools.memory_search_tool import MemorySearchTool
 
 
-SESSION_ID = "test:private:session-1"
+SESSION_ID = "test:FriendMessage:session-1"
 
 
 @pytest.fixture
 def memory_engine():
     engine = Mock()
-    engine.search_memories = AsyncMock(return_value=[])
-    return engine
+    engine.identity_store = None
+    engine.search_memories = AsyncMock(side_effect=AssertionError("unscoped search"))
+    engine.search_memories_for_identity = AsyncMock(return_value=[])
+    yield engine
+    engine.search_memories.assert_not_awaited()
 
 
 @pytest.fixture
@@ -28,12 +31,27 @@ def astr_context():
 
 def _make_run_context():
     event = Mock()
-    event.unified_msg_origin = "test:private:session-1"
+    event.unified_msg_origin = "test:FriendMessage:session-1"
+    event.get_group_id.return_value = ""
+    event.get_extra.return_value = None
+    event.get_platform_name.return_value = "test"
+    event.get_sender_id.return_value = "user-1"
 
     run_context = Mock()
     run_context.context = Mock()
     run_context.context.event = event
     return run_context
+
+
+def _assert_identity(engine, scope=SESSION_ID, persona_id="persona_a"):
+    identity = engine.search_memories_for_identity.await_args.kwargs["identity"]
+    assert identity["scope"] == scope
+    assert identity["legacy_scopes"] == [SESSION_ID]
+    assert identity["origin_session_id"] == SESSION_ID
+    assert identity["source_account"] == "test:user-1"
+    assert identity["audience"] == "self_private"
+    assert identity["persona_id"] == (persona_id or "")
+    assert identity["person_scopes"] == []
 
 
 @pytest.mark.asyncio
@@ -51,7 +69,7 @@ async def test_memory_search_tool_uses_filtering_settings(memory_engine, astr_co
         ),
         memory_engine=memory_engine,
     )
-    memory_engine.search_memories = AsyncMock(return_value=[])
+    memory_engine.search_memories_for_identity = AsyncMock(return_value=[])
 
     with patch(
         "astrbot_plugin_livingmemory.core.tools.memory_search_tool.get_persona_id",
@@ -66,12 +84,13 @@ async def test_memory_search_tool_uses_filtering_settings(memory_engine, astr_co
         "session_filtered": True,
         "persona_filtered": True,
     }
-    memory_engine.search_memories.assert_awaited_once_with(
+    memory_engine.search_memories_for_identity.assert_awaited_once_with(
         query="喜欢的游戏",
         k=6,
-        session_id="test:private:session-1",
+        identity=ANY,
         persona_id="persona_a",
     )
+    _assert_identity(memory_engine)
 
 
 @pytest.mark.asyncio
@@ -98,13 +117,14 @@ async def test_memory_search_tool_disables_filters_when_config_disabled(
         get_persona.return_value = "persona_a"
         await tool.call(_make_run_context(), query="项目约定")
 
-    memory_engine.search_memories.assert_awaited_once_with(
+    memory_engine.search_memories_for_identity.assert_awaited_once_with(
         query="项目约定",
         k=5,
-        # 作用域解析失败时回退到原始会话（与写入侧语义一致）
-        session_id=_make_run_context().context.event.unified_msg_origin,
+        identity=ANY,
         persona_id=None,
     )
+    # 禁用会话过滤也只双读当前来源，不能退化为全库查询。
+    _assert_identity(memory_engine, scope="", persona_id=None)
     get_persona.assert_not_awaited()
 
 
@@ -129,12 +149,13 @@ async def test_memory_search_tool_uses_user_scope(memory_engine, astr_context):
 
     await tool.call(run_context, query="跨会话项目")
 
-    memory_engine.search_memories.assert_awaited_once_with(
+    memory_engine.search_memories_for_identity.assert_awaited_once_with(
         query="跨会话项目",
         k=5,
-        session_id="livingmemory:user:test:user-1",
+        identity=ANY,
         persona_id=None,
     )
+    _assert_identity(memory_engine, scope="livingmemory:user:test:user-1", persona_id=None)
 
 
 @pytest.mark.parametrize(
@@ -142,8 +163,8 @@ async def test_memory_search_tool_uses_user_scope(memory_engine, astr_context):
     [
         # legacy 默认：作用域即当前会话，属于会话级过滤
         ({"use_session_filtering": True}, SESSION_ID, True),
-        # legacy 关闭会话过滤：作用域为 None，回退会话查询但不算会话过滤
-        ({"use_session_filtering": False}, SESSION_ID, False),
+        # legacy 关闭会话过滤：显式范围为空，仅通过 legacy_scopes 双读当前会话。
+        ({"use_session_filtering": False}, "", False),
         ({"memory_scope_mode": "session"}, SESSION_ID, True),
         ({"memory_scope_mode": "global"}, GLOBAL_MEMORY_SCOPE, False),
         ({"memory_scope_mode": "user"}, "livingmemory:user:test:user-1", False),
@@ -195,9 +216,7 @@ async def test_memory_search_tool_reports_actual_session_filtering(
         "session_filtered": expected_session_filtered,
         "persona_filtered": False,
     }
-    assert memory_engine.search_memories.await_args.kwargs["session_id"] == (
-        expected_session_id
-    )
+    _assert_identity(memory_engine, scope=expected_session_id, persona_id=None)
 
 
 @pytest.mark.asyncio
@@ -220,7 +239,7 @@ async def test_memory_search_tool_denies_unlisted_user(memory_engine, astr_conte
     result = json.loads(await tool.call(run_context, query="private memory"))
 
     assert result["error"] == "memory access is not allowed"
-    memory_engine.search_memories.assert_not_awaited()
+    memory_engine.search_memories_for_identity.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -230,7 +249,7 @@ async def test_memory_search_tool_serializes_results(memory_engine, astr_context
         config_manager=ConfigManager(),
         memory_engine=memory_engine,
     )
-    memory_engine.search_memories = AsyncMock(
+    memory_engine.search_memories_for_identity = AsyncMock(
         return_value=[
             Mock(
                 doc_id=7,
@@ -238,7 +257,7 @@ async def test_memory_search_tool_serializes_results(memory_engine, astr_context
                 final_score=0.91,
                 metadata={
                     "importance": 0.8,
-                    "session_id": "test:private:session-1",
+                    "session_id": "test:FriendMessage:session-1",
                     "persona_id": "persona_a",
                     "create_time": 100.0,
                     "last_access_time": 200.0,
@@ -262,7 +281,7 @@ async def test_memory_search_tool_serializes_results(memory_engine, astr_context
         "content": "用户喜欢高难度动作游戏",
         "score": 0.91,
         "importance": 0.8,
-        "session_id": "test:private:session-1",
+        "session_id": "test:FriendMessage:session-1",
         "persona_id": "persona_a",
         "create_time": 100.0,
         "last_access_time": 200.0,
@@ -274,7 +293,7 @@ async def test_memory_search_tool_serializes_results(memory_engine, astr_context
 async def test_memory_search_tool_includes_retained_source_on_request(
     memory_engine, astr_context
 ):
-    memory_engine.search_memories = AsyncMock(
+    memory_engine.search_memories_for_identity = AsyncMock(
         return_value=[
             Mock(
                 doc_id=9,
@@ -316,7 +335,7 @@ async def test_memory_search_tool_serializes_non_dict_metadata(
         config_manager=ConfigManager(),
         memory_engine=memory_engine,
     )
-    memory_engine.search_memories = AsyncMock(
+    memory_engine.search_memories_for_identity = AsyncMock(
         return_value=[
             Mock(
                 doc_id=8,
@@ -362,12 +381,13 @@ async def test_memory_search_tool_limits_k_by_config(memory_engine, astr_context
         get_persona.return_value = "persona_a"
         await tool.call(_make_run_context(), query="偏好", k=9)
 
-    memory_engine.search_memories.assert_awaited_once_with(
+    memory_engine.search_memories_for_identity.assert_awaited_once_with(
         query="偏好",
         k=4,
-        session_id="test:private:session-1",
+        identity=ANY,
         persona_id="persona_a",
     )
+    _assert_identity(memory_engine)
 
 
 @pytest.mark.asyncio
@@ -385,7 +405,7 @@ async def test_memory_search_tool_clamps_low_k_to_one(memory_engine, astr_contex
         ),
         memory_engine=memory_engine,
     )
-    memory_engine.search_memories = AsyncMock(return_value=[])
+    memory_engine.search_memories_for_identity = AsyncMock(return_value=[])
 
     with patch(
         "astrbot_plugin_livingmemory.core.tools.memory_search_tool.get_persona_id",
@@ -394,12 +414,12 @@ async def test_memory_search_tool_clamps_low_k_to_one(memory_engine, astr_contex
         get_persona.return_value = "persona_a"
 
         await tool.call(_make_run_context(), query="test query", k=0)
-        called_k_zero = memory_engine.search_memories.await_args.kwargs["k"]
+        called_k_zero = memory_engine.search_memories_for_identity.await_args.kwargs["k"]
         assert called_k_zero == 1
 
-        memory_engine.search_memories.reset_mock()
+        memory_engine.search_memories_for_identity.reset_mock()
         await tool.call(_make_run_context(), query="test query", k=-3)
-        called_k_negative = memory_engine.search_memories.await_args.kwargs["k"]
+        called_k_negative = memory_engine.search_memories_for_identity.await_args.kwargs["k"]
         assert called_k_negative == 1
 
 
@@ -412,7 +432,7 @@ async def test_memory_search_tool_falls_back_to_default_k_for_invalid_input(
         config_manager=ConfigManager({"recall_engine": {"top_k": 3, "max_k": 8}}),
         memory_engine=memory_engine,
     )
-    memory_engine.search_memories = AsyncMock(return_value=[])
+    memory_engine.search_memories_for_identity = AsyncMock(return_value=[])
 
     with patch(
         "astrbot_plugin_livingmemory.core.tools.memory_search_tool.get_persona_id",
@@ -421,12 +441,13 @@ async def test_memory_search_tool_falls_back_to_default_k_for_invalid_input(
         get_persona.return_value = "persona_a"
         await tool.call(_make_run_context(), query="test query", k="bad")
 
-    memory_engine.search_memories.assert_awaited_once_with(
+    memory_engine.search_memories_for_identity.assert_awaited_once_with(
         query="test query",
         k=3,
-        session_id="test:private:session-1",
+        identity=ANY,
         persona_id="persona_a",
     )
+    _assert_identity(memory_engine)
 
 
 @pytest.mark.asyncio
@@ -444,7 +465,7 @@ async def test_memory_search_tool_returns_structured_error_for_empty_query(
 
     assert result["results"] == []
     assert result["error"] == "query is empty"
-    memory_engine.search_memories.assert_not_called()
+    memory_engine.search_memories_for_identity.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -464,7 +485,7 @@ async def test_memory_search_tool_returns_not_initialized_error(memory_engine):
         "results": [],
         "error": "memory search tool is not initialized",
     }
-    memory_engine.search_memories.assert_not_called()
+    memory_engine.search_memories_for_identity.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -476,7 +497,7 @@ async def test_memory_search_tool_hides_internal_exception_details(
         config_manager=ConfigManager(),
         memory_engine=memory_engine,
     )
-    memory_engine.search_memories = AsyncMock(
+    memory_engine.search_memories_for_identity = AsyncMock(
         side_effect=RuntimeError("secret db path")
     )
 
@@ -499,7 +520,7 @@ async def test_memory_search_tool_propagates_cancellation(memory_engine, astr_co
         config_manager=ConfigManager(),
         memory_engine=memory_engine,
     )
-    memory_engine.search_memories = AsyncMock(side_effect=asyncio.CancelledError())
+    memory_engine.search_memories_for_identity = AsyncMock(side_effect=asyncio.CancelledError())
 
     with patch(
         "astrbot_plugin_livingmemory.core.tools.memory_search_tool.get_persona_id",

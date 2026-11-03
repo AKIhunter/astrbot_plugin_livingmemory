@@ -200,6 +200,7 @@ class LivingMemoryPlugin(Star):
         file_hash: str = "",
         request_id: str = "",
         archive_affected: bool = False,
+        expected_binding: dict | None = None,
     ) -> dict:
         """改绑定：版本化软失效 + 审计；不重写已有记忆。
 
@@ -237,6 +238,7 @@ class LivingMemoryPlugin(Star):
             reason=reason,
             file_hash=file_hash,
             request_id=request_id,
+            expected_binding=expected_binding,
         )
         return {
             "before": before,
@@ -286,6 +288,7 @@ class LivingMemoryPlugin(Star):
         reviewer: str = "",
         reason: str = "上传关联关系",
         request_id: str = "",
+        expected_active: list[dict] | None = None,
     ) -> dict:
         """上传关联关系：默认 merge；冲突行单列待人工审。"""
         store = getattr(self.initializer, "identity_store", None)
@@ -294,6 +297,7 @@ class LivingMemoryPlugin(Star):
         return await store.merge_upload(
             rows, mode=mode, file_hash=file_hash, operator=operator,
             reviewer=reviewer, reason=reason, request_id=request_id,
+            expected_active=expected_active,
         )
 
     # ---------------------------------------------------------- 绑定管理（阶段 3）
@@ -356,8 +360,9 @@ class LivingMemoryPlugin(Star):
         )
 
     async def review_binding_candidate(
-        self, candidate_id: str, *, approve: bool, reviewer: str = "",
+        self, candidate_id: str, *, approve: bool = False, reviewer: str = "",
         reason: str = "", request_id: str = "",
+        expected_candidate: dict | None = None,
     ) -> dict | None:
         store = getattr(self.initializer, "identity_store", None)
         if store is None:
@@ -365,6 +370,7 @@ class LivingMemoryPlugin(Star):
         return await store.review_candidate(
             candidate_id, approve=approve, reviewer=reviewer,
             reason=reason, channel="page", request_id=request_id,
+            expected_candidate=expected_candidate,
         )
 
     async def get_binding_settings(self) -> dict:
@@ -427,6 +433,9 @@ class LivingMemoryPlugin(Star):
             ):
                 logger.error("插件初始化不完整：部分核心组件未能初始化")
                 return False
+
+            # 工具和命令共用当前绑定存储；每次请求重新解析 active 绑定。
+            self.initializer.memory_engine.identity_store = self.initializer.identity_store
 
             # 创建事件处理器（幂等）
             if not self.event_handler:

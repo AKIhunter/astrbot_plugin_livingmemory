@@ -18,7 +18,9 @@ from .managers.memory_engine import MemoryEngine
 from .managers.scope_migrator import ScopeMigrator
 from .identity import (
     audience_for,
+    build_identity_context,
     normalize_platform,
+    parse_session_origin,
     session_ref_for,
     source_account_for,
 )
@@ -168,9 +170,22 @@ class CommandHandler:
         k = max(1, min(k, 100))
 
         try:
-            session_id = event.unified_msg_origin
-            results = await self.memory_engine.search_memories(
-                query=query.strip(), k=k, session_id=session_id
+            from .utils import get_persona_id
+
+            if not is_event_memory_allowed(self.config_manager, event):
+                yield event.plain_result(t("search.no_results", query=query))
+                return
+            persona_id = (
+                await get_persona_id(self.context, event)
+                if self.config_manager.filtering_settings.get("use_persona_filtering", True)
+                else None
+            )
+            identity = await build_identity_context(
+                self.config_manager, event, getattr(self.memory_engine, "identity_store", None),
+                persona_id=persona_id or "",
+            )
+            results = await self.memory_engine.search_memories_for_identity(
+                query=query.strip(), k=k, identity=identity, persona_id=persona_id
             )
 
             if not results:
@@ -672,7 +687,7 @@ class CommandHandler:
             platform = normalize_platform(session_id.split(":", 1)[0].split("_")[0])
             first_message = history_messages[0] if history_messages else None
             if is_group_chat:
-                scene_id = str(getattr(first_message, "group_id", "") or "")
+                _, _, scene_id = parse_session_origin(session_id)
                 metadata["source_account"] = ""
                 metadata["visible_to"] = "origin_group"
             else:

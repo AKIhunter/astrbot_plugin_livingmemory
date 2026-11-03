@@ -1,6 +1,7 @@
 """Lifecycle-resolved recall must stay authoritative through prompt formatting."""
 
 import copy
+import json
 import time
 
 import aiosqlite
@@ -24,13 +25,32 @@ class _RecallEngine(MemoryEngineCrudMixin, MemoryEngineEvidenceMixin):
         self.atom_enabled = True
         self.atom_store = object()
 
+    async def get_memory(self, memory_id):
+        cursor = await self.db_connection.execute(
+            "SELECT id, text, metadata FROM documents WHERE id=?", (memory_id,)
+        )
+        row = await cursor.fetchone()
+        return {"id": row[0], "text": row[1], "metadata": json.loads(row[2])} if row else None
+
 
 async def _create_atoms(connection, rows):
+    # 新校验回查当前父记录及子项归属；夹具使用真实列结构，生命周期断言保持不变。
     await connection.execute(
         "CREATE TABLE memory_atoms (id INTEGER PRIMARY KEY, parent_memory_id INTEGER, "
-        "content TEXT, status TEXT, expires_at REAL)"
+        "content TEXT, status TEXT, expires_at REAL, session_id TEXT, persona_id TEXT, metadata TEXT)"
     )
-    await connection.executemany("INSERT INTO memory_atoms VALUES (?, ?, ?, ?, ?)", rows)
+    await connection.executemany(
+        "INSERT INTO memory_atoms VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [(*row, "synthetic-scope", "synthetic-persona", '{"adapter_id":"synthetic-adapter"}') for row in rows],
+    )
+    await connection.execute(
+        "CREATE TABLE documents (id INTEGER PRIMARY KEY, text TEXT, metadata TEXT)"
+    )
+    parent = _parent_result()
+    await connection.execute(
+        "INSERT INTO documents VALUES (?, ?, ?)",
+        (parent.doc_id, parent.content, json.dumps(parent.metadata)),
+    )
     await connection.commit()
 
 
@@ -43,6 +63,9 @@ def _parent_result():
         vector_score=None,
         content="STALE_TASK_A and LIVE_TASK_B",
         metadata={
+            "session_id": "synthetic-scope",
+            "persona_id": "synthetic-persona",
+            "adapter_id": "synthetic-adapter",
             "atom_types": ["planned"],
             "summary_schema_version": "v2",
             "persona_summary": "I remember STALE_TASK_A and LIVE_TASK_B.",

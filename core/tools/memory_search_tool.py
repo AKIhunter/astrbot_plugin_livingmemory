@@ -13,6 +13,7 @@ from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
 
 from ..base.config_manager import ConfigManager
+from ..identity import build_identity_context
 from ..memory_scope import is_event_memory_allowed, resolve_memory_scope
 from ..utils import get_persona_id
 
@@ -119,7 +120,6 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
 
             # 作用域解析失败时回退到原始会话，与写入侧（反思/总结/工具）保持一致
             recall_scope = resolve_memory_scope(self.config_manager, event)
-            recall_session_id = recall_scope or event.unified_msg_origin
             # session_filtered 只表示本次查询是否真的按会话隔离：global / user
             # 作用域跨会话共享，legacy 未启用会话过滤（scope 为 None）也不是会话
             # 过滤；只有解析出的作用域就是当前会话 ID 时才为 True，避免误报
@@ -139,10 +139,14 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
 
             limited_k = max(1, min(requested_k_int, max_k))
 
-            memories = await self.memory_engine.search_memories(
+            identity = await build_identity_context(
+                self.config_manager, event, getattr(self.memory_engine, "identity_store", None),
+                persona_id=recall_persona_id or "",
+            )
+            memories = await self.memory_engine.search_memories_for_identity(
                 query=cleaned_query,
                 k=limited_k,
-                session_id=recall_session_id,
+                identity=identity,
                 persona_id=recall_persona_id,
             )
 
@@ -159,7 +163,8 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     "create_time": metadata.get("create_time"),
                     "last_access_time": metadata.get("last_access_time"),
                 }
-                if include_source and metadata.get("has_source"):
+                # 原始对话可能比摘要更敏感，不在群聊/公开工具输出中附带。
+                if include_source and identity["audience"] == "self_private" and metadata.get("has_source"):
                     get_source = getattr(
                         self.memory_engine, "get_memory_source", None
                     )

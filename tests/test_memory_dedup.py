@@ -74,8 +74,10 @@ async def test_find_similar_memory_survives_retriever_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_merge_duplicate_memory_updates_metadata_and_sources() -> None:
+async def test_merge_duplicate_memory_updates_metadata_and_sources(tmp_path) -> None:
     engine = MemoryEngine.__new__(MemoryEngine)
+    # 合并已接入真实隐私处理器，隔离其词表和密钥目录，不 mock 掉安全处理。
+    engine.db_path = str(tmp_path / "memory.db")
     engine.db_connection = Mock()
     engine.atom_enabled = False
     engine.atom_store = None

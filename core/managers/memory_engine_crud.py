@@ -15,9 +15,12 @@ import aiosqlite
 from astrbot.api import logger
 
 from ...storage.atom_store import AtomStore
-from ..identity import audience_allows
+from ..identity import (
+    audience_allows, build_identity_from_refs, infer_audience, parse_session_origin,
+    sensitivity_level,
+)
 from ..memory_transfer import memory_import_key
-from ..privacy import apply_privacy
+from ..privacy import apply_privacy, decrypt_text, restore_private_fields
 from ..processors.atom_classifier import classify_atoms
 from ..retrieval.hybrid_retriever import HybridResult
 from ..retrieval.route_execution import search_route
@@ -90,14 +93,18 @@ class MemoryEngineCrudMixin:
 
         # 阶段 1：敏感字段在写入前统一落库。等级 >=2 时索引只收泛化文本，
         # 加密原文只放 metadata，不进入向量库。
+        metadata = dict(metadata or {})
+        metadata["audience"] = infer_audience({"session_id": session_id, **metadata})
         privacy = apply_privacy(
             content,
-            dict(metadata or {}),
+            metadata,
             os.path.dirname(str(self.db_path or ".")),
             audience=str((metadata or {}).get("audience") or ""),
+            atoms=atoms,
         )
         content = privacy.index_text
         metadata = privacy.metadata
+        atoms = privacy.atoms
 
         full_metadata = self._build_memory_metadata(
             session_id=session_id,
@@ -109,7 +116,10 @@ class MemoryEngineCrudMixin:
             source_messages=source_messages,
         )
         doc_id = await self.index_writer.add_memory(content, full_metadata)
-        await self._write_memory_atoms(doc_id, session_id, persona_id, atoms)
+        await self._write_memory_atoms(
+            doc_id, full_metadata.get("session_id"), full_metadata.get("persona_id"),
+            atoms, full_metadata.get("adapter_id"),
+        )
         await self._index_memory_graph(doc_id, content, full_metadata, atoms)
         await self._persist_memory_source(doc_id, source_messages)
         self._invalidate_search_cache()
@@ -170,14 +180,16 @@ class MemoryEngineCrudMixin:
         session_id: str | None,
         persona_id: str | None,
         atoms: list | None,
+        adapter_id: str | None = None,
     ) -> None:
         """写入记忆原子：批量失败时逐条重试，仍失败的留给启动时对账。"""
         if not atoms or self.atom_store is None or not self.atom_enabled:
             return
         prepared_atoms = []
         for atom in atoms:
-            atom.session_id = atom.session_id or session_id
-            atom.persona_id = atom.persona_id or persona_id
+            atom.session_id = session_id
+            atom.persona_id = persona_id
+            atom.metadata["adapter_id"] = adapter_id
             atom.parent_memory_id = doc_id
             prepared_atoms.append(atom)
         try:
@@ -198,7 +210,7 @@ class MemoryEngineCrudMixin:
                     raise
                 except Exception:
                     logger.error(
-                        f"[MemoryEngine] 写入记忆原子失败: {atom.content[:80]}",
+                        "[MemoryEngine] 写入记忆原子失败",
                         exc_info=True,
                     )
 
@@ -396,6 +408,11 @@ class MemoryEngineCrudMixin:
             raise ValueError("统一检索不支持合并范围")
         if self.hybrid_retriever is None:
             raise RuntimeError("检索器未就绪")
+        platform, kind, scene_id = parse_session_origin(session_id)
+        identity = build_identity_from_refs(
+            platform=platform, kind=kind, scene_id=scene_id,
+            origin_session_id=session_id, persona_id=persona_id,
+        )
         results = await self.hybrid_retriever.search(
             query, max(1, min(k, 4)), session_id, persona_id
         )
@@ -410,6 +427,7 @@ class MemoryEngineCrudMixin:
                 or md.get("persona_id") != persona_id
                 or md.get("status") != "active"
                 or row.get("text") != result.content
+                or not audience_allows(md, identity)
             ):
                 continue
             checked.append(replace(result, metadata=md))
@@ -425,6 +443,8 @@ class MemoryEngineCrudMixin:
         k: int = 5,
         session_id: str | None = None,
         persona_id: str | None = None,
+        *,
+        allow_legacy_migration: bool = True,
     ) -> list[HybridResult]:
         """
         检索相关记忆
@@ -457,7 +477,8 @@ class MemoryEngineCrudMixin:
 
         # 如果session_id是unified_msg_origin格式，自动触发旧数据迁移
         if (
-            session_id
+            allow_legacy_migration
+            and session_id
             and ":" in session_id
             and not session_id.startswith("livingmemory:")
         ):
@@ -584,11 +605,31 @@ class MemoryEngineCrudMixin:
                 k=max(1, k * 2),
                 session_id=str(scope),
                 persona_id=persona_id,
+                allow_legacy_migration=False,
             )
             for result in results or []:
-                metadata = result.metadata or {}
-                if not audience_allows(metadata, identity):
+                # 缓存、近期补全及原子路由都不是授权源；回查当前行防止旧标签放行。
+                row = await self.get_memory(result.doc_id)
+                metadata = safe_json_dict(row.get("metadata")) if row else {}
+                if (
+                    metadata.get("session_id") != scope
+                    or (persona_id is not None and metadata.get("persona_id") != persona_id)
+                    or metadata.get("status") != "active"
+                    or not audience_allows(metadata, identity)
+                ):
                     continue
+                # 原子内容也可能来自缓存，必须重新读取当前父子记录再拼装。
+                if result.metadata.get("retrieved_atom_ids"):
+                    refreshed = await self._apply_atom_policy([
+                        replace(result, content=row["text"], metadata=metadata)
+                    ])
+                    if not refreshed:
+                        continue
+                    result = refreshed[0]
+                elif row.get("text") != result.content:
+                    # 与 scoped 入口保持一致：持久正文变更后拒绝返回旧缓存正文。
+                    continue
+                result = replace(result, metadata={**result.metadata, **metadata})
                 current = merged.get(result.doc_id)
                 if current is None or result.final_score > current.final_score:
                     merged[result.doc_id] = result
@@ -598,8 +639,8 @@ class MemoryEngineCrudMixin:
     async def _apply_atom_policy(self, results, skip_doc_ids: set[int] | None = None):
         """Resolve atom-backed recall content from current lifecycle state.
 
-        与 Beta 自主召回共用 `_agentic_atom_rows` / `_agentic_live_rows`：
-        原子表的读取和 active/expires 过滤只有一份实现。
+        生命周期沿用 `_agentic_live_rows`，另取子项归属与当前父记录核对。
+        不改变当前关闭的 Beta 自主召回链路。
 
         Args:
             results: Document candidates, including cached or recent results.
@@ -613,9 +654,19 @@ class MemoryEngineCrudMixin:
             return results
         skip = skip_doc_ids or set()
         pending = [result for result in results if result.doc_id not in skip]
-        grouped = await self._agentic_atom_rows(
-            [result.doc_id for result in pending]
-        )
+        grouped = {}
+        ids = list(dict.fromkeys(result.doc_id for result in pending))
+        if ids and await self._agentic_has_atom_table():
+            for start in range(0, len(ids), 500):
+                batch = ids[start:start + 500]
+                async with self.db_connection.execute(
+                    "SELECT id, parent_memory_id, content, status, expires_at, "
+                    "session_id, persona_id, metadata FROM memory_atoms "
+                    f"WHERE parent_memory_id IN ({','.join('?' for _ in batch)}) ORDER BY id",
+                    batch,
+                ) as cursor:
+                    for row in await cursor.fetchall():
+                        grouped.setdefault(int(row[1]), []).append(row)
         filtered = []
         for result in results:
             if result.doc_id in skip:
@@ -625,7 +676,17 @@ class MemoryEngineCrudMixin:
             if atoms is None and not result.metadata.get("atom_types"):
                 filtered.append(result)
                 continue
-            active = self._agentic_live_rows(atoms or [])
+            parent = await self.get_memory(result.doc_id)
+            if not parent:
+                continue
+            parent_metadata = safe_json_dict(parent.get("metadata"))
+            active = [
+                row for row in self._agentic_live_rows(atoms or [])
+                if row[5] == parent_metadata.get("session_id")
+                and row[6] == parent_metadata.get("persona_id")
+                and (safe_json_dict(row[7]).get("adapter_id") or "")
+                == (parent_metadata.get("adapter_id") or "")
+            ]
             if not active:
                 continue
             filtered.append(
@@ -963,15 +1024,52 @@ class MemoryEngineCrudMixin:
             return False
         metadata = metadata or {}
         current_metadata = safe_json_dict(memory.get("metadata"))
-        patch: dict[str, Any] = {}
+        # 合并不能改变父记录归属；来源场景冲突时只收紧受众，不继承新来源放宽旧记录。
+        for key in ("session_id", "persona_id", "adapter_id"):
+            if metadata.get(key) is not None and metadata[key] != current_metadata.get(key):
+                return False
+        data_dir = os.path.dirname(str(self.db_path or "."))
+        try:
+            combined_metadata = restore_private_fields(current_metadata, data_dir)
+        except (ValueError, TypeError):
+            logger.warning("[MemoryEngine] 敏感字段无法解密，拒绝合并以保留原值")
+            return False
 
         for key in ("topics", "key_facts", "participants", "participant_identities"):
             incoming = metadata.get(key)
             if not incoming:
                 continue
-            merged = self._merge_unique_values(current_metadata.get(key), incoming)
+            merged = self._merge_unique_values(combined_metadata.get(key), incoming)
             if merged:
-                patch[key] = merged
+                combined_metadata[key] = merged
+        for key in ("persona_summary", "canonical_summary", "content_text"):
+            if key in metadata:
+                combined_metadata[key] = metadata[key]
+        current_audience = infer_audience(current_metadata)
+        incoming_audience = infer_audience({**current_metadata, **metadata})
+        combined_metadata["audience"] = (
+            current_audience if current_audience == incoming_audience else "self_private"
+        )
+        combined_metadata["sensitivity"] = max(
+            sensitivity_level(current_metadata), sensitivity_level(metadata),
+        )
+        # 新事实的显式私聊限制也必须保留；未知旧限制保持原样，不能借合并放宽。
+        current_visibility = str(current_metadata.get("visible_to") or "")
+        if metadata.get("visible_to") == "self_private" and (
+            current_visibility in {"", "internal", "public", "origin_group", "self_private"}
+            or current_visibility.startswith("origin_group:")
+        ):
+            combined_metadata["visible_to"] = "self_private"
+        # 与 add_memory 共用处理器；父级先提级，随后才允许新 atom 落库。
+        privacy = apply_privacy(
+            None, combined_metadata, data_dir,
+            audience=combined_metadata["audience"], atoms=atoms,
+        )
+        atoms = privacy.atoms
+        patch = {
+            key: value for key, value in privacy.metadata.items()
+            if value != current_metadata.get(key)
+        }
 
         now = time.time()
         source_window = metadata.get("source_window")
@@ -1005,7 +1103,18 @@ class MemoryEngineCrudMixin:
             return False
 
         if atoms and self.atom_store is not None and self.atom_enabled:
-            await self._append_atoms_to_memory(memory_id, atoms, metadata)
+            await self._insert_private_atoms(memory_id, atoms, privacy.metadata)
+            atom_types = sorted(set(current_metadata.get("atom_types") or []) | {
+                getattr(getattr(atom, "atom_type", None), "value", "unknown")
+                for atom in atoms
+            })
+            await self.index_writer.update_metadata(memory_id, {"atom_types": atom_types})
+            # 追加完成后以当前全部原子建立图，不能只更新父摘要而漏掉 atom-only 新事实。
+            stored_atoms = await self.atom_store.get_by_parent(memory_id)
+            await self._index_memory_graph(
+                memory_id, memory["text"], privacy.metadata, stored_atoms,
+            )
+            self._invalidate_search_cache()
 
         dedup_cfg = self.config.get("memory_dedup") or {}
         if source_messages and bool(dedup_cfg.get("merge_sources", True)):
@@ -1054,33 +1163,57 @@ class MemoryEngineCrudMixin:
         atoms: list,
         metadata: dict[str, Any],
     ) -> None:
-        """Attach newly classified atoms to an existing memory, skipping duplicates."""
+        """兼容直接追加入口，也必须先走父记录提级与新载荷隐私处理。"""
+        memory = await self.get_memory(memory_id)
+        if memory:
+            current = safe_json_dict(memory.get("metadata"))
+            await self.merge_duplicate_memory(
+                memory_id, importance=current.get("importance", 0.5),
+                metadata=metadata, atoms=atoms,
+            )
+
+    async def _insert_private_atoms(
+        self, memory_id: int, atoms: list, metadata: dict[str, Any],
+    ) -> None:
+        """仅由已完成隐私处理的合并分支调用，跳过重复的泛化原子。"""
         if self.db_connection is None or self.atom_store is None:
             return
         cursor = await self.db_connection.execute(
-            "SELECT content FROM memory_atoms WHERE parent_memory_id = ?",
+            "SELECT content, metadata FROM memory_atoms WHERE parent_memory_id = ?",
             (int(memory_id),),
         )
-        existing_contents = {
-            str(row[0]).strip() for row in await cursor.fetchall() if row[0]
-        }
+        data_dir = os.path.dirname(str(self.db_path or "."))
+
+        def original_content(content, atom_metadata):
+            cipher = safe_json_dict(atom_metadata).get("secret_text_enc")
+            # 不同原文可能具有同一泛称；只在可恢复的原文相同或普通正文相同时去重。
+            return decrypt_text(cipher, data_dir).strip() if cipher else str(content).strip()
+
+        existing_contents = set()
+        for row in await cursor.fetchall():
+            original = original_content(row[0], row[1])
+            if original:
+                existing_contents.add(original)
         session_id = metadata.get("session_id")
         persona_id = metadata.get("persona_id")
         for atom in atoms:
             content = str(getattr(atom, "content", "") or "").strip()
-            if not content or content in existing_contents:
+            original = original_content(content, atom.metadata)
+            if not content or (original and original in existing_contents):
                 continue
             atom.parent_memory_id = memory_id
-            atom.session_id = atom.session_id or session_id
-            atom.persona_id = atom.persona_id or persona_id
+            atom.session_id = session_id
+            atom.persona_id = persona_id
+            atom.metadata["adapter_id"] = metadata.get("adapter_id")
             try:
                 await self.atom_store.insert(atom)
-                existing_contents.add(content)
+                if original:
+                    existing_contents.add(original)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.warning(
-                    f"[MemoryEngine] 合并记忆原子失败 (memory_id={memory_id}): {content[:60]}",
+                    f"[MemoryEngine] 合并记忆原子失败 (memory_id={memory_id})",
                     exc_info=True,
                 )
 

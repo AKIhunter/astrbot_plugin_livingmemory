@@ -149,7 +149,7 @@ async def test_group_assistant_replaces_user_name_with_bot_name(tmp_path: Path):
     store = ConversationStore(str(tmp_path / "group-bot.db"))
     await store.initialize()
     manager = ConversationManager(store=store)
-    event = _DummyEvent("test:group:g1", group=True)
+    event = _DummyEvent("test:GroupMessage:u1_g1", group=True)
     event.bot_name = "LivingMemory Bot"
 
     message = await manager.add_message_from_event(
@@ -158,7 +158,7 @@ async def test_group_assistant_replaces_user_name_with_bot_name(tmp_path: Path):
 
     assert message.sender_id == "bot-1"
     assert message.sender_name == "LivingMemory Bot"
-    assert message.group_id == "test:group:g1"
+    assert message.group_id == "g1"
     await store.close()
 
 
