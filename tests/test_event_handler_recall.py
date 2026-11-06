@@ -138,16 +138,16 @@ async def test_enforce_message_limit_uses_cleanup_batch_size(
     conversation_manager.get_session_metadata = AsyncMock(return_value=80)
     conversation_manager.trim_session_messages = AsyncMock(return_value=20)
 
-    await handler._message_utils.enforce_message_limit("test:private:sid-1")
+    await handler._message_utils.enforce_message_limit("test:FriendMessage:sid-1")
 
     conversation_manager.trim_session_messages.assert_awaited_once_with(
-        "test:private:sid-1", 20
+        "test:FriendMessage:sid-1", 20
     )
     conversation_manager.get_session_metadata.assert_any_await(
-        "test:private:sid-1", "last_summarized_index", 60
+        "test:FriendMessage:sid-1", "last_summarized_index", 0
     )
     conversation_manager.update_session_metadata.assert_not_awaited()
-    conversation_manager.invalidate_cache.assert_awaited_once_with("test:private:sid-1")
+    conversation_manager.invalidate_cache.assert_awaited_once_with("test:FriendMessage:sid-1")
 
 
 @pytest.mark.asyncio
@@ -561,5 +561,4 @@ async def test_handle_memory_reflection_pending_retry_exceeds_max(
     assert session_metadata.get("pending_summary") is None
     # add_memory 不应被调用（放弃了该范围）
     memory_engine.add_memory.assert_not_awaited()
-
 

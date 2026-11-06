@@ -496,7 +496,7 @@ def mock_event():
     """Create a minimal mock event compatible with command/event handlers."""
 
     class _Event:
-        unified_msg_origin = "test:private:session-1"
+        unified_msg_origin = "test:FriendMessage:session-1"
 
         def plain_result(self, message):
             return message
@@ -509,6 +509,12 @@ def mock_event():
 
         def get_self_id(self):
             return "bot-1"
+
+        def get_group_id(self):
+            return ""
+
+        def get_extra(self, key):
+            return None
 
         def get_sender_name(self):
             return "Tester"

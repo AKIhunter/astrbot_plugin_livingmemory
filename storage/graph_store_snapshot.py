@@ -1,3 +1,4 @@
+# 图谱快照继承当前 one_id 和适配器访问范围。
 """
 GraphStore 的 GraphStoreSnapshotMixin 拆分模块
 自动从 storage/graph_store.py 拆分，保持行为不变
@@ -6,6 +7,9 @@ GraphStore 的 GraphStoreSnapshotMixin 拆分模块
 from __future__ import annotations
 
 from typing import Any
+
+from ..core.memory_scope import adapter_sql
+from ..core.identity_access import identity_sql, identity_visible
 
 import aiosqlite
 
@@ -88,6 +92,8 @@ class GraphStoreSnapshotMixin:
                 continue
             if normalized in seen_memory_ids:
                 continue
+            if not identity_visible(normalized):
+                continue
             seen_memory_ids.add(normalized)
             normalized_memory_ids.append(normalized)
         return normalized_memory_ids
@@ -99,6 +105,7 @@ class GraphStoreSnapshotMixin:
         limit_edges: int,
     ) -> tuple[list[aiosqlite.Row], list[aiosqlite.Row], list[aiosqlite.Row]]:
         """一次连接内读取 entry / node / edge 三批快照行。"""
+        ownership, ownership_params = adapter_sql("metadata")
         memory_placeholders = ",".join("?" * len(normalized_memory_ids))
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
@@ -107,11 +114,11 @@ class GraphStoreSnapshotMixin:
                 SELECT id, source_memory_id, session_id, persona_id,
                        entry_type, relation_type, content, metadata, edge_id
                 FROM graph_entries
-                WHERE source_memory_id IN ({memory_placeholders})
+                WHERE source_memory_id IN ({memory_placeholders}) AND {ownership}
                 ORDER BY id DESC
                 LIMIT ?
                 """,
-                (*normalized_memory_ids, limit_entries),
+                (*normalized_memory_ids, *ownership_params, limit_entries),
             )
             entry_rows = await entry_cursor.fetchall()
 
@@ -414,6 +421,7 @@ class GraphStoreSnapshotMixin:
         self,
         session_id: str | None = None,
         persona_id: str | None = None,
+        memory_ids: list[int] | None = None,
     ) -> dict[str, Any]:
         """Return the complete scoped graph and memory-node associations.
 
@@ -426,12 +434,26 @@ class GraphStoreSnapshotMixin:
         """
         filters: list[str] = []
         params: list[Any] = []
+        if memory_ids is not None:
+            ids = self._normalize_snapshot_ids(memory_ids)
+            if not ids:
+                return {"nodes": [], "edges": [], "entries": [], "memories": []}
+            # 通过JSON表传参，避免大人物记忆集合突破SQLite参数数量上限。
+            import json
+            filters.append("ge.source_memory_id IN (SELECT value FROM json_each(?))")
+            params.append(json.dumps(ids))
         if session_id is not None:
             filters.append("ge.session_id = ?")
             params.append(session_id)
         if persona_id is not None:
             filters.append("ge.persona_id = ?")
             params.append(persona_id)
+        ownership, ownership_params = adapter_sql("ge.metadata")
+        filters.append(ownership)
+        params.extend(ownership_params)
+        identity_filter, identity_params = identity_sql("ge.source_memory_id")
+        filters.append(identity_filter)
+        params.extend(identity_params)
         where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
 
         async with self._connect() as db:

@@ -2,9 +2,9 @@ name: Tests
 
 on:
   push:
-    branches: [master]
+    branches: [main, master]
   pull_request:
-    branches: [master]
+    branches: [main, master]
   workflow_dispatch:
 
 permissions:
@@ -67,3 +67,11 @@ jobs:
       - name: Run frontend tests
         working-directory: AstrBot/data/plugins/astrbot_plugin_livingmemory
         run: npm run test:frontend
+
+      - name: Check generated dashboard
+        working-directory: AstrBot/data/plugins/astrbot_plugin_livingmemory
+        run: npm run check:dashboard
+
+      - name: Build documentation
+        working-directory: AstrBot/data/plugins/astrbot_plugin_livingmemory
+        run: npm run docs:build

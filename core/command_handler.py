@@ -1,3 +1,4 @@
+# one_id 核心接入：保留既有命令行为。
 """
 命令处理器
 负责处理插件命令
@@ -217,6 +218,7 @@ class CommandHandler:
                     graph_vec=breakdown.get("graph_vector_score", 0.0),
                 )
 
+            await self.memory_engine.validate_identity_results(results)
             yield event.plain_result(message)
         except Exception as e:
             logger.error(f"搜索失败: {e}", exc_info=True)
@@ -682,24 +684,23 @@ class CommandHandler:
                 "triggered_by": "manual",
             }
             metadata["source_session_id"] = session_id
-
-            # 阶段 1：手动总结同样只挂来源账号与受众；群总结不划给个人。
+            # 阶段 1：与自动总结同口径，只记来源账号与受众。
             platform = normalize_platform(session_id.split(":", 1)[0].split("_")[0])
             first_message = history_messages[0] if history_messages else None
             if is_group_chat:
                 _, _, scene_id = parse_session_origin(session_id)
-                metadata["source_account"] = ""
-                metadata["visible_to"] = "origin_group"
             else:
                 scene_id = str(
                     getattr(first_message, "sender_id", "")
                     or (session_id.rsplit(":", 1)[-1] if ":" in session_id else "")
                 )
-                metadata["source_account"] = source_account_for(platform, scene_id)
-                metadata["visible_to"] = "self_private"
+            metadata["source_account"] = (
+                "" if is_group_chat else source_account_for(platform, scene_id)
+            )
             metadata["audience"] = audience_for(
                 "group" if is_group_chat else "private", scene_id
             )
+            metadata["visible_to"] = "origin_group" if is_group_chat else "self_private"
             metadata["origin_session_ref"] = session_ref_for(
                 platform, "group" if is_group_chat else "private", scene_id
             )

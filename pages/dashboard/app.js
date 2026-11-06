@@ -12,6 +12,7 @@ import {
   PromptPage,
   SettingsPage,
   KnowledgePage,
+  BindingPage,
   esc,
 } from "./modules/index.js";
 
@@ -56,6 +57,7 @@ import {
   const promptPage = new PromptPage(state, api);
   const settingsPage = new SettingsPage(state, api);
   const knowledgePage = new KnowledgePage(state, api);
+  const bindingPage = new BindingPage(state, api, peekPanel);
 
   function hydrateIcons() {
     if (!window.lucide || typeof window.lucide.createIcons !== "function") return;
@@ -107,7 +109,7 @@ import {
   let pageInitialized = false;
   async function switchPage(name) {
     if (pageInitialized && name === state.page) return;
-    if (memoryPage._bulkBusy || memoryPage._transferBusy || knowledgePage.busy) {
+    if (memoryPage._bulkBusy || memoryPage._transferBusy || knowledgePage.busy || bindingPage.busy) {
       showToast(window.t("flow.waitForSave"));
       return;
     }
@@ -117,6 +119,7 @@ import {
     if (!await peekPanel.requestClose() || generation !== navigationGeneration) return;
     if (state.page === "prompts") await promptPage.closeEditor({ force: true });
     if (state.page === "knowledge") knowledgePage.leave();
+    if (state.page === "bindings") bindingPage.leave();
     pageInitialized = true;
     state.page = name;
 
@@ -141,6 +144,7 @@ import {
     if (name === "prompts") promptPage.fetch();
     if (name === "settings") settingsPage.fetch();
     if (name === "knowledge") knowledgePage.fetch();
+    if (name === "bindings") bindingPage.fetch();
   }
 
   function normalizeLocale(locale) {

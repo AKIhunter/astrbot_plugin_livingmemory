@@ -99,6 +99,14 @@ class MemoryHandler(MemoryHandlerUpdateMixin, MemoryHandlerIoMixin):
         if type_filter and type_filter.lower() == "all":
             type_filter = None
         sort_key = str(query.get("sort", "created_desc")).strip().lower()
+        person_id = str(query.get("person_id") or "").strip() or None
+        sensitivity = query.get("sensitivity")
+        if sensitivity in (None, "", "all"):
+            sensitivity = None
+        elif str(sensitivity) in {"0", "1", "2", "3"}:
+            sensitivity = int(sensitivity)
+        else:
+            return self.utils.error("敏感等级必须是0–3")
 
         try:
             page = max(1, int(query.get("page", 1)))
@@ -107,6 +115,11 @@ class MemoryHandler(MemoryHandlerUpdateMixin, MemoryHandlerIoMixin):
             return self.utils.error("分页参数无效")
 
         try:
+            extra_filters = {}
+            if person_id:
+                extra_filters["person_id"] = person_id
+            if sensitivity is not None:
+                extra_filters["sensitivity"] = sensitivity
             page_data = await memory_engine.list_memories_page(
                 session_id=session_id,
                 keyword=keyword,
@@ -115,6 +128,7 @@ class MemoryHandler(MemoryHandlerUpdateMixin, MemoryHandlerIoMixin):
                 sort_key=sort_key,
                 page=page,
                 page_size=page_size,
+                **extra_filters,
             )
         except Exception as exc:
             logger.error(f"[PageAPI] 获取记忆列表失败: {exc}", exc_info=True)
@@ -145,6 +159,8 @@ class MemoryHandler(MemoryHandlerUpdateMixin, MemoryHandlerIoMixin):
                     "keyword": keyword,
                     "status": status_filter,
                     "type": type_filter,
+                    "sensitivity": sensitivity,
+                    "person_id": person_id,
                 },
                 "sort": page_data["sort"],
             }
@@ -281,4 +297,3 @@ class MemoryHandler(MemoryHandlerUpdateMixin, MemoryHandlerIoMixin):
                 "new_memory_id": new_memory_id,
             }
         )
-

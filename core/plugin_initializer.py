@@ -70,14 +70,14 @@ class PluginInitializer(InitializerFaissMixin, InitializerFinalizeMixin):
         # FAISS 索引异步落盘器（core/faiss_async_persist.py），随 db/graph_db 创建
         self._index_persisters: list = []
         self.memory_engine: MemoryEngine | None = None
-        # 阶段 1：人物绑定与绑定审计（与 livingmemory.db 同库）
-        self.identity_store: Any | None = None
         self.memory_processor: MemoryProcessor | None = None
         self.db_migration: DBMigration | None = None
         self.conversation_manager: ConversationManager | None = None
         self.index_validator: IndexValidator | None = None
         self.decay_scheduler: DecayScheduler | None = None
         self.consolidation_manager: MemoryConsolidationManager | None = None
+        # 阶段 1：人物绑定 + 绑定审计（与 livingmemory.db 共用文件）
+        self.identity_store: Any | None = None
 
         # 初始化状态
         self._initialization_complete = False

@@ -22,7 +22,10 @@ async def test_actual_integer_memory_id_and_native_metadata_are_scoped(tmp_path)
     path = tmp_path / "native.db"
     storage = native.DocumentStorage(str(path))
     await storage.initialize()
-    metadata = {"session_id": "session", "persona_id": "persona", "status": "active"}
+    session = "qq:FriendMessage:123"
+    metadata = {"session_id": session, "source_session_id": session,
+                "source_account": "qq:123", "audience": "self_private",
+                "sensitivity": 0, "persona_id": "persona", "status": "active"}
     identifier = await storage.insert_document("uuid-not-integer", "native experience", metadata)
     try:
         probe = NativeProbe()
@@ -33,7 +36,7 @@ async def test_actual_integer_memory_id_and_native_metadata_are_scoped(tmp_path)
         ]))
         probe._apply_atom_policy = AsyncMock(side_effect=lambda rows: rows)
         probe._filter_by_retrieval_policy = lambda rows: rows
-        found = await probe.search_memories_scoped("native", session_id="session", persona_id="persona")
+        found = await probe.search_memories_scoped("native", session_id=session, persona_id="persona")
         assert found[0]["memory_id"] == identifier
         # 同一候选仍在检索层中，但原生当前记录已撤销，会在返回前被排除。
         async with aiosqlite.connect(path) as db:
@@ -41,7 +44,7 @@ async def test_actual_integer_memory_id_and_native_metadata_are_scoped(tmp_path)
                 json.dumps({**metadata, "status": "deleted"}), identifier,
             ))
             await db.commit()
-        assert await probe.search_memories_scoped("native", session_id="session", persona_id="persona") == []
+        assert await probe.search_memories_scoped("native", session_id=session, persona_id="persona") == []
     finally:
         await storage.engine.dispose()
 

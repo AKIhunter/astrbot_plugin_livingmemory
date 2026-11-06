@@ -1,3 +1,4 @@
+# 原子按父记忆 ID 应用 one_id 允许集。
 """SQLite-backed storage for time-aware memory atoms."""
 
 from __future__ import annotations
@@ -7,6 +8,9 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
+
+from ..core.memory_scope import adapter_sql
+from ..core.identity_access import identity_sql, identity_current
 
 import aiosqlite
 
@@ -20,6 +24,7 @@ from ..core.models.memory_atom import (
     compute_ttl,
 )
 from ..core.utils.json_utils import safe_json_dict
+from ..core.retention import retained_atom_ttl
 
 
 class AtomStore:
@@ -27,8 +32,9 @@ class AtomStore:
 
     _SQLITE_BATCH_SIZE = 500
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, config: dict[str, Any] | None = None):
         self.db_path = db_path
+        self.config = config or {}
 
     @asynccontextmanager
     async def _connect(self):
@@ -127,6 +133,16 @@ class AtomStore:
                 logger.info(
                     f"[AtomStore] 原子 FTS 索引不一致（{fts_count}/{atom_count}），已从源表重建"
                 )
+            if self.config.get("long_term_retention_enabled", False):
+                # 以创建时间延长仍有效原子；重启不漂移，不复活任何失效状态。
+                days = float(self.config.get("retention_atom_days", 3650))
+                await db.execute(
+                    "UPDATE memory_atoms SET ttl_days = MAX(ttl_days, ?), "
+                    "expires_at = MAX(expires_at, created_at + ? * 86400) "
+                    "WHERE status = 'active' AND expires_at > ? "
+                    "AND atom_type IN ('factual', 'relational', 'preference', 'episodic')",
+                    (days, days, time.time()),
+                )
             await db.commit()
 
     async def insert(self, atom: MemoryAtom) -> int:
@@ -171,6 +187,7 @@ class AtomStore:
         ttl, decay = compute_ttl(
             atom.atom_type, atom.importance, atom.reinforcement_count, atom.event_time
         )
+        ttl = retained_atom_ttl(atom.atom_type.value, ttl, self.config)
         atom.ttl_days = ttl
         atom.decay_type = decay
         atom.expires_at = now + ttl * 86400.0
@@ -250,6 +267,8 @@ class AtomStore:
         include_expired: bool = False,
     ) -> list[MemoryAtom]:
         """Full-text search over atom content, returning time-scored results."""
+        if not await identity_current():
+            return []
         if not query or not query.strip():
             return []
 
@@ -277,6 +296,12 @@ class AtomStore:
         if persona_id is not None:
             filters.append("ma.persona_id = ?")
             params.append(persona_id)
+        ownership, ownership_params = adapter_sql("ma.metadata")
+        identity_filter, identity_params = identity_sql("ma.parent_memory_id")
+        ownership = f"({ownership}) AND ({identity_filter})"
+        ownership_params.extend(identity_params)
+        filters.append(ownership)
+        params.extend(ownership_params)
 
         where_clause = f"AND {' AND '.join(filters)}" if filters else ""
 
@@ -320,11 +345,12 @@ class AtomStore:
                     like_params_full.append(session_id)
                 if persona_id is not None:
                     like_params_full.append(persona_id)
+                like_params_full.extend(ownership_params)
                 cursor = await db.execute(
                     f"""
                     SELECT ma.*, 0.5 AS bm25_score
                     FROM memory_atoms ma
-                    WHERE ({like_clauses}) {status_filter} {session_filter} {persona_filter}
+                    WHERE ({like_clauses}) {status_filter} {session_filter} {persona_filter} AND {ownership}
                     ORDER BY ma.id DESC
                     LIMIT ?
                     """,
@@ -394,6 +420,7 @@ class AtomStore:
             atom_type = AtomType(row["atom_type"])
             event_time = float(row["event_time"]) if row["event_time"] else None
             new_ttl, decay = compute_ttl(atom_type, importance, new_count, event_time)
+            new_ttl = retained_atom_ttl(atom_type.value, new_ttl, self.config)
 
             confidence = (
                 new_confidence
@@ -548,10 +575,12 @@ class AtomStore:
 
     async def get_stats(self) -> dict[str, int]:
         """Return per-status atom counts."""
+        ownership, ownership_params = adapter_sql("metadata")
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT status, COUNT(*) AS cnt FROM memory_atoms GROUP BY status"
+                f"SELECT status, COUNT(*) AS cnt FROM memory_atoms WHERE {ownership} GROUP BY status",
+                ownership_params,
             )
             rows = await cursor.fetchall()
         stats: dict[str, int] = {s.value: 0 for s in AtomStatus}
@@ -561,17 +590,22 @@ class AtomStore:
 
     async def count_atoms(self) -> int:
         """Return the total number of atoms."""
+        ownership, ownership_params = adapter_sql("metadata")
         async with self._connect() as db:
-            cursor = await db.execute("SELECT COUNT(*) FROM memory_atoms")
+            cursor = await db.execute(
+                f"SELECT COUNT(*) FROM memory_atoms WHERE {ownership}", ownership_params
+            )
             row = await cursor.fetchone()
         return int(row[0]) if row else 0
 
     async def count_by_type(self) -> dict[str, int]:
         """Return per-type atom counts for frontend display."""
+        ownership, ownership_params = adapter_sql("metadata")
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT atom_type, COUNT(*) AS cnt FROM memory_atoms GROUP BY atom_type"
+                f"SELECT atom_type, COUNT(*) AS cnt FROM memory_atoms WHERE {ownership} GROUP BY atom_type",
+                ownership_params,
             )
             rows = await cursor.fetchall()
         breakdown: dict[str, int] = {}

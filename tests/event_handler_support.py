@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from tests.identity_fixture_support import identity_engine_fixture, summary_window_fixture
 from astrbot_plugin_livingmemory.core.base.config_manager import ConfigManager
 from astrbot_plugin_livingmemory.core.event_handler import EventHandler
 
@@ -21,7 +22,7 @@ def memory_engine():
     engine = Mock()
     engine.search_memories = AsyncMock(return_value=[])
     engine.add_memory = AsyncMock(return_value=1)
-    return engine
+    return identity_engine_fixture(engine)
 
 
 @pytest.fixture
@@ -49,7 +50,7 @@ def conversation_manager():
 
     manager.get_session_metadata = AsyncMock(side_effect=_get_session_metadata)
     manager.get_messages_range = AsyncMock(
-        return_value=[Mock(group_id=None), Mock(group_id=None)]
+        return_value=[Mock(group_id=None) for _ in range(12)]
     )
     manager.update_session_metadata = AsyncMock(side_effect=_update_session_metadata)
     manager.invalidate_cache = AsyncMock()
@@ -62,7 +63,7 @@ def conversation_manager():
     manager.store.connection = Mock()
     manager.store.connection.execute = AsyncMock(return_value=Mock(rowcount=1))
     manager.store.connection.commit = AsyncMock()
-    return manager
+    return summary_window_fixture(manager)
 
 
 @pytest.fixture
@@ -102,7 +103,7 @@ def _make_resp(text: str = "assistant reply"):
 
 def _make_event(group: bool = False, checkpoint: str | None = None):
     event = Mock()
-    event.unified_msg_origin = "test:private:sid-1"
+    event.unified_msg_origin = "test:FriendMessage:sid-1"
     event.get_message_type = Mock(
         return_value=MessageType.GROUP_MESSAGE if group else MessageType.FRIEND_MESSAGE
     )
@@ -112,6 +113,8 @@ def _make_event(group: bool = False, checkpoint: str | None = None):
     event.get_message_str = Mock(return_value="hello")
     event.get_messages = Mock(return_value=[])
     event.get_platform_name = Mock(return_value="test")
+    event.get_group_id = Mock(return_value="group-1" if group else "")
+    event.get_extra = Mock(return_value=None)
     if checkpoint is not None:
         event.get_extra = Mock(return_value=checkpoint)
     return event
@@ -138,7 +141,7 @@ async def _make_real_handler(tmp_path, memory_engine=None):
         engine = Mock()
         engine.search_memories = AsyncMock(return_value=[])
         engine.add_memory = AsyncMock(return_value=1)
-        memory_engine = engine
+        memory_engine = identity_engine_fixture(engine)
 
     handler = EventHandler(
         context=Mock(),

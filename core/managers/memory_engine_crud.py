@@ -1,3 +1,4 @@
+# one_id 核心接入：读取限制先于截断，写入保留原始来源。
 """
 MemoryEngine 的 MemoryEngineCrudMixin 拆分模块
 自动从 core/managers/memory_engine.py 拆分，保持行为不变
@@ -17,10 +18,19 @@ from astrbot.api import logger
 from ...storage.atom_store import AtomStore
 from ..identity import (
     audience_allows, build_identity_from_refs, infer_audience, parse_session_origin,
-    sensitivity_level,
+    sensitivity_level, legacy_shared_scope_selectors, legacy_shared_scope_allows,
+    shared_record_identity_allows,
 )
 from ..memory_transfer import memory_import_key
 from ..privacy import apply_privacy, decrypt_text, restore_private_fields
+from ..memory_scope import (
+    adapter_sql,
+    adapter_visible,
+    current_adapter_access,
+    infer_adapter_id,
+)
+from ..retrieval.vector_search import retrieve_documents
+from ..identity_access import identity_access, current_identity_access, identity_visible, identity_sql
 from ..processors.atom_classifier import classify_atoms
 from ..retrieval.hybrid_retriever import HybridResult
 from ..retrieval.route_execution import search_route
@@ -94,6 +104,7 @@ class MemoryEngineCrudMixin:
         # 阶段 1：敏感字段在写入前统一落库。等级 >=2 时索引只收泛化文本，
         # 加密原文只放 metadata，不进入向量库。
         metadata = dict(metadata or {})
+        metadata = await self.enrich_identity_metadata(metadata)
         metadata["audience"] = infer_audience({"session_id": session_id, **metadata})
         privacy = apply_privacy(
             content,
@@ -115,13 +126,34 @@ class MemoryEngineCrudMixin:
             preserve_create_time=preserve_create_time,
             source_messages=source_messages,
         )
-        doc_id = await self.index_writer.add_memory(content, full_metadata)
-        await self._write_memory_atoms(
-            doc_id, full_metadata.get("session_id"), full_metadata.get("persona_id"),
-            atoms, full_metadata.get("adapter_id"),
+        access = current_adapter_access.get()
+        full_metadata["adapter_id"] = full_metadata.get("adapter_id") or (
+            access.adapter_id
+            if access is not None
+            else infer_adapter_id(
+                full_metadata,
+                source_messages or [],
+                self.config.get("adapter_instances"),
+            )
         )
+        doc_id = await self.index_writer.add_memory(content, full_metadata)
+        try:
+            await self._write_memory_atoms(
+                doc_id, full_metadata.get("session_id"), full_metadata.get("persona_id"),
+                atoms, full_metadata.get("adapter_id"),
+            )
+        except (Exception, asyncio.CancelledError):
+            # 原子写入失败时父记忆已落索引；补偿删除，避免失败请求留下半写记录。
+            await asyncio.shield(self.delete_memory(doc_id))
+            raise
         await self._index_memory_graph(doc_id, content, full_metadata, atoms)
         await self._persist_memory_source(doc_id, source_messages)
+        store = getattr(self, "identity_store", None)
+        if store is not None and not await store.is_context_current(full_metadata):
+            # 宿主写索引含异步操作；提交期间关联变化时补偿新增记录，拒绝旧总结。
+            await self.delete_memory(doc_id)
+            from ...storage.oneid_store import IdentityContextChanged
+            raise IdentityContextChanged("写入期间身份变化，请重新生成总结")
         self._invalidate_search_cache()
         return doc_id
 
@@ -150,6 +182,14 @@ class MemoryEngineCrudMixin:
         # 先合并外部 metadata，再确保时间字段不被覆盖
         if metadata:
             full_metadata.update(metadata)
+        # 与生产 2.9.0 一致：写入当前真实适配器，历史仅按可证明来源派生。
+        access = current_adapter_access.get()
+        if access is not None:
+            full_metadata["adapter_id"] = access.adapter_id
+        elif not full_metadata.get("adapter_id"):
+            adapter_id = infer_adapter_id(full_metadata, source_messages or ())
+            if adapter_id:
+                full_metadata["adapter_id"] = adapter_id
         if source_messages:
             full_metadata["has_source"] = True
             full_metadata["source_message_count"] = len(source_messages)
@@ -182,7 +222,7 @@ class MemoryEngineCrudMixin:
         atoms: list | None,
         adapter_id: str | None = None,
     ) -> None:
-        """写入记忆原子：批量失败时逐条重试，仍失败的留给启动时对账。"""
+        """Insert owned atoms once and propagate storage failures to the caller."""
         if not atoms or self.atom_store is None or not self.atom_enabled:
             return
         prepared_atoms = []
@@ -192,27 +232,7 @@ class MemoryEngineCrudMixin:
             atom.metadata["adapter_id"] = adapter_id
             atom.parent_memory_id = doc_id
             prepared_atoms.append(atom)
-        try:
-            await self.atom_store.insert_many(prepared_atoms)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.error(
-                "[MemoryEngine] 批量写入记忆原子失败，改为逐条重试",
-                exc_info=True,
-            )
-            for atom in prepared_atoms:
-                if getattr(atom, "atom_id", 0):
-                    continue
-                try:
-                    await self.atom_store.insert(atom)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.error(
-                        "[MemoryEngine] 写入记忆原子失败",
-                        exc_info=True,
-                    )
+        await self.atom_store.insert_many(prepared_atoms)
 
     async def _index_memory_graph(
         self,
@@ -282,6 +302,11 @@ class MemoryEngineCrudMixin:
 
     async def get_memory_source(self, memory_id: int) -> list[dict[str, Any]]:
         """Return structured source messages for one memory."""
+        if (
+            (current_adapter_access.get() is not None or current_identity_access.get() is not None)
+            and await self.get_memory(memory_id) is None
+        ):
+            return []
         if self.db_connection is None:
             return []
         cursor = await self.db_connection.execute(
@@ -294,6 +319,9 @@ class MemoryEngineCrudMixin:
         try:
             value = json.loads(row[0])
         except (json.JSONDecodeError, TypeError):
+            return []
+        access = current_identity_access.get()
+        if access is not None and not await access.current():
             return []
         return value if isinstance(value, list) else []
 
@@ -312,10 +340,15 @@ class MemoryEngineCrudMixin:
 
         async def _fetch_rows(batch: list[int] | None):
             params: list[Any] = []
-            where_clause = ""
+            ownership, ownership_params = adapter_sql("d.metadata")
+            where_clause = f"WHERE {ownership}"
+            params.extend(ownership_params)
+            identity_filter, identity_params = identity_sql("d.id")
+            where_clause += f" AND {identity_filter}"
+            params.extend(identity_params)
             if batch is not None:
                 placeholders = ",".join("?" * len(batch))
-                where_clause = f"WHERE d.id IN ({placeholders})"
+                where_clause += f" AND d.id IN ({placeholders})"
                 params.extend(batch)
             cursor = await self.db_connection.execute(
                 f"""
@@ -369,6 +402,9 @@ class MemoryEngineCrudMixin:
             return records
 
         await asyncio.to_thread(_build_records)
+        access = current_identity_access.get()
+        if access is not None and not await access.current():
+            return []
         return records
 
     async def get_memory_import_keys(self) -> set[tuple[str, str, str]]:
@@ -464,6 +500,10 @@ class MemoryEngineCrudMixin:
         cache_key = self._search_cache_key(query, k, session_id, persona_id)
         cached_results = self._get_cached_search_results(cache_key)
         if cached_results is not None:
+            access = current_identity_access.get()
+            if access is not None and not await access.current():
+                return []
+            cached_results = [row for row in cached_results if identity_visible(row.doc_id)]
             cached_results = await self._apply_atom_policy(cached_results)
             await self._update_access_times_internal(
                 [result.doc_id for result in cached_results],
@@ -473,6 +513,11 @@ class MemoryEngineCrudMixin:
                     for atom_id in result.metadata.get("retrieved_atom_ids", [])
                 ],
             )
+            if access is not None:
+                if not await access.current():
+                    return []
+                cached_results = [replace(row, metadata={**row.metadata, "_identity_revision": access.revision})
+                                  for row in cached_results if identity_visible(row.doc_id)]
             return cached_results
 
         # 如果session_id是unified_msg_origin格式，自动触发旧数据迁移
@@ -517,7 +562,8 @@ class MemoryEngineCrudMixin:
                         scores.get(atom.parent_memory_id, 0), atom.final_score
                     )
             if scores:
-                documents = await self.faiss_db.document_storage.get_documents(
+                documents = await retrieve_documents(
+                    self.faiss_db,
                     metadata_filters={}, ids=list(scores), limit=len(scores)
                 )
                 for document in documents:
@@ -571,7 +617,51 @@ class MemoryEngineCrudMixin:
             )
 
         self._set_cached_search_results(cache_key, results)
+        access = current_identity_access.get()
+        if access is not None:
+            if not await access.current():
+                return []
+            results = [replace(row, metadata={**row.metadata, "_identity_revision": access.revision})
+                       for row in results if identity_visible(row.doc_id)]
         return results
+
+    async def _shared_legacy_scopes(
+        self, identity: dict[str, Any], persona_id: str | None,
+    ) -> list[str]:
+        """参数化枚举有账号证据的旧范围；缺表/不可读时仅保留原有精确范围。"""
+        selectors = legacy_shared_scope_selectors(identity)
+        if not selectors or self.db_connection is None:
+            return []
+        selectors = [
+            (value, prefix) for value, prefix in selectors
+            if not any(other != value and is_prefix and value.startswith(other)
+                       for other, is_prefix in selectors)
+        ]
+        scopes = []
+        for value, prefix in selectors:
+            # LIKE中的用户账号字符必须转义，避免下划线/百分号扩大匹配。
+            pattern = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            parameters = [pattern + "%" if prefix else value]
+            operator = "LIKE ? ESCAPE '\\'" if prefix else "= ?"
+            condition = ""
+            if persona_id is not None:
+                condition = " AND json_extract(metadata, '$.persona_id') = ?"
+                parameters.append(persona_id)
+            try:
+                async with self.db_connection.execute(
+                    "SELECT metadata FROM documents WHERE json_valid(metadata) "
+                    "AND json_extract(metadata, '$.status') = 'active' "
+                    f"AND json_extract(metadata, '$.session_id') {operator}{condition}",
+                    parameters,
+                ) as cursor:
+                    async for row in cursor:
+                        metadata = safe_json_dict(row[0])
+                        if legacy_shared_scope_allows(metadata, identity):
+                            scopes.append(metadata["session_id"])
+            except aiosqlite.Error as exc:
+                logger.warning("[Audience] 旧范围不可读取，保留原精确范围: %s", type(exc).__name__)
+                return []
+        return list(dict.fromkeys(scopes))
 
     async def search_memories_for_identity(
         self,
@@ -589,12 +679,30 @@ class MemoryEngineCrudMixin:
         """
         if not query or not query.strip() or not isinstance(identity, dict):
             return []
+        from contextlib import nullcontext
+        from ...storage.oneid_store import IdentityContextChanged
+        try:
+            access = await self.prepare_identity_recall(identity, persona_id)
+        except IdentityContextChanged:
+            return []
+        with identity_access(access) if access is not None else nullcontext():
+            results = await self._search_memories_for_identity(query, identity, persona_id, k)
+            if access is not None:
+                if not await access.current():
+                    return []
+                results = [replace(row, metadata={**row.metadata, "_identity_revision": access.revision})
+                           for row in results if identity_visible(row.doc_id)]
+            return results
+
+    async def _search_memories_for_identity(self, query, identity, persona_id, k):
         # 阶段 1 回写：同一人物已绑定的其他账号范围也纳入双读（仍逐条过受众过滤）。
         scopes = [
             identity.get("scope") or "",
             *(identity.get("person_scopes") or []),
             *(identity.get("legacy_scopes") or []),
         ]
+        original_scopes = set(scopes)
+        scopes.extend(await self._shared_legacy_scopes(identity, persona_id))
         scopes = list(dict.fromkeys(scope for scope in scopes if str(scope or "").strip()))
         if not scopes:
             return []
@@ -616,6 +724,10 @@ class MemoryEngineCrudMixin:
                     or (persona_id is not None and metadata.get("persona_id") != persona_id)
                     or metadata.get("status") != "active"
                     or not audience_allows(metadata, identity)
+                    or (identity.get("scene_kind") == "group"
+                        and not shared_record_identity_allows(metadata, identity))
+                    or (scope not in original_scopes
+                        and not legacy_shared_scope_allows(metadata, identity))
                 ):
                     continue
                 # 原子内容也可能来自缓存，必须重新读取当前父子记录再拼装。
@@ -692,9 +804,7 @@ class MemoryEngineCrudMixin:
             filtered.append(
                 replace(
                     result,
-                    content="\n".join(
-                        dict.fromkeys(str(row[2]) for row in active)
-                    ),
+                    content="\n".join(dict.fromkeys(str(row[2]) for row in active)),
                     metadata={
                         **result.metadata,
                         "retrieved_atom_ids": [int(row[0]) for row in active],
@@ -716,7 +826,8 @@ class MemoryEngineCrudMixin:
         # 从faiss_db的document_storage获取文档
         try:
             # 使用 get_documents (复数) 并传入 ids 参数
-            docs = await self.faiss_db.document_storage.get_documents(
+            docs = await retrieve_documents(
+                self.faiss_db,
                 metadata_filters={}, ids=[memory_id], limit=1
             )
 
@@ -751,6 +862,9 @@ class MemoryEngineCrudMixin:
         if self.db_connection is None:
             logger.warning("[MemoryEngine] 数据库连接未初始化，无法读取记忆记录")
             return None
+        access = current_identity_access.get()
+        if not identity_visible(memory_id) or (access is not None and not await access.current()):
+            return None
         try:
             cursor = await self.db_connection.execute(
                 """
@@ -761,7 +875,9 @@ class MemoryEngineCrudMixin:
                 (memory_id,),
             )
             row = await cursor.fetchone()
-            if not row:
+            if not row or not adapter_visible(safe_json_dict(row["metadata"])):
+                return None
+            if access is not None and not await access.current():
                 return None
             return {
                 "id": row["id"],
@@ -787,6 +903,8 @@ class MemoryEngineCrudMixin:
         sort_key: str = "created_desc",
         page: int = 1,
         page_size: int = 20,
+        sensitivity: int | None = None,
+        person_id: str | None = None,
     ) -> dict[str, Any]:
         """
         分页列出记忆（供管理页面使用），支持会话/状态/类型/关键词过滤与排序。
@@ -814,8 +932,24 @@ class MemoryEngineCrudMixin:
             raise RuntimeError("数据库连接未初始化")
 
         offset = (max(1, page) - 1) * page_size
-        where_clauses: list[str] = []
-        params: list[Any] = []
+        ownership, ownership_params = adapter_sql("metadata")
+        where_clauses: list[str] = [ownership]
+        params: list[Any] = list(ownership_params)
+        identity_filter, identity_params = identity_sql("id")
+        where_clauses.append(identity_filter)
+        params.extend(identity_params)
+        # 参数化筛选与真实分页共用同一谓词，不能先分页再在前端过滤。
+        from ..person_query import install_sensitivity, person_predicate
+        if sensitivity is not None:
+            if type(sensitivity) is not int or sensitivity not in range(4):
+                raise ValueError("敏感等级必须是0–3")
+            await install_sensitivity(self.db_connection)
+            where_clauses.append("lm_sensitivity(metadata) = ?")
+            params.append(sensitivity)
+        if person_id:
+            clause, bound_params = await person_predicate(self.db_connection, person_id)
+            where_clauses.append(clause)
+            params.extend(bound_params)
         type_expr = (
             "UPPER(COALESCE(json_extract(metadata, '$.memory_type'), 'GENERAL'))"
         )
@@ -1084,8 +1218,12 @@ class MemoryEngineCrudMixin:
         )
         patch["dedup_last_merged_at"] = now
 
-        current_importance = clamp_float(current_metadata.get("importance"), default=0.5)
-        merged_importance = max(current_importance, clamp_float(importance, default=0.5))
+        current_importance = clamp_float(
+            current_metadata.get("importance"), default=0.5
+        )
+        merged_importance = max(
+            current_importance, clamp_float(importance, default=0.5)
+        )
         try:
             success = await self.update_memory(
                 memory_id,
@@ -1452,6 +1590,12 @@ class MemoryEngineCrudMixin:
             bool: 是否删除成功
         """
 
+        if (
+            current_adapter_access.get() is not None
+            and await self.get_memory(memory_id) is None
+        ):
+            return False
+
         # index_writer.delete_memory() 内部已按顺序删除 BM25、向量索引和 documents 表
         if self.index_writer is None:
             logger.error("索引写入器未初始化")
@@ -1683,7 +1827,9 @@ class MemoryEngineCrudMixin:
             return False
         self._access_update_pending.update(int(doc_id) for doc_id in doc_ids)
         if atom_ids:
-            self._access_atom_update_pending.update(int(atom_id) for atom_id in atom_ids)
+            self._access_atom_update_pending.update(
+                int(atom_id) for atom_id in atom_ids
+            )
         if not self._access_update_pending:
             return False
         if self._access_flush_task is None or self._access_flush_task.done():
@@ -1707,7 +1853,9 @@ class MemoryEngineCrudMixin:
             self._access_update_pending.difference_update(doc_ids)
             self._access_atom_update_pending.difference_update(atom_ids)
 
-    async def _write_access_updates(self, doc_ids: list[int], atom_ids: list[int]) -> bool:
+    async def _write_access_updates(
+        self, doc_ids: list[int], atom_ids: list[int]
+    ) -> bool:
         """单条原子 SQL 批量递增访问时间与次数。"""
         unique_ids = list(dict.fromkeys(int(doc_id) for doc_id in doc_ids))
         if not unique_ids or self.db_connection is None:
@@ -1783,19 +1931,20 @@ class MemoryEngineCrudMixin:
         # 因为现在数据库中存储的就是完整的unified_msg_origin格式
 
         # 使用数据库层面的过滤、排序和分页，避免加载所有数据
+        ownership, ownership_params = adapter_sql("metadata")
         try:
             if self.db_connection is None:
                 return []
 
             cursor = await self.db_connection.execute(
-                """
+                f"""
                 SELECT id, text, metadata
                 FROM documents
-                WHERE json_extract(metadata, '$.session_id') = ?
+                WHERE json_extract(metadata, '$.session_id') = ? AND {ownership}
                 ORDER BY CAST(json_extract(metadata, '$.create_time') AS REAL) DESC
                 LIMIT ?
                 """,
-                (session_id, limit),
+                (session_id, *ownership_params, limit),
             )
             rows = await cursor.fetchall()
 

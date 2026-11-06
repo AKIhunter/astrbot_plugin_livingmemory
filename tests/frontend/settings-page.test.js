@@ -79,7 +79,7 @@ test("settings render a short common panel plus collapsed categories", () => {
   assert.doesNotMatch(container.innerHTML, /<details[^>]* open/);
   // The quick field is not duplicated inside its category.
   assert.equal(
-    (container.innerHTML.match(/recall_engine\.top_k/g) || []).length,
+    (container.innerHTML.match(/data-setting-path="recall_engine\.top_k"/g) || []).length,
     1
   );
 });

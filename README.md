@@ -1,81 +1,93 @@
-<p align="center">
-  <strong>中文</strong> · <a href="README_en.md">English</a> · <a href="README_ru.md">Русский</a>
-</p>
+<div align="center">
+<h1>LivingMemory</h1>
+<img src=".github/img/Banner.png" alt="LivingMemory 长期记忆保留" width="1200">
 
-> 本仓库是 AKIhunter 的服务器维护 fork，基于官方 2.8.4，默认分支为
-> `main`。已集成百炼 v4 统一向量缓存并保留服务器补丁；
-> [接入与计量](docs/shared-embedding-cache.md) · [发布与升级记录](docs/server-maintenance.md)。
-> 保留上游作者、文档及 AGPL-3.0 许可证。后续升级请使用此 fork 的 `main` 分支。
+**中文** · [English](README_en.md) · [Русский](README_ru.md)
 
-![LivingMemory：连接偏好、人物、计划与上下文的长期记忆](docs/public/images/livingmemory-cover.svg)
+[2.10.0 下载](https://github.com/AKIhunter/astrbot_plugin_livingmemory/releases/tag/2.10.0) · [使用文档](docs/index.md) · [问题反馈](https://github.com/AKIhunter/astrbot_plugin_livingmemory/issues) · [AGPL-3.0](LICENSE)
+</div>
 
-<p align="center">
-  <a href="https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/"><strong>使用文档</strong></a> ·
-  <a href="https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/webui"><strong>管理界面</strong></a> ·
-  <a href="https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases"><strong>版本下载</strong></a> ·
-  <a href="https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/issues"><strong>问题反馈</strong></a>
-</p>
+LivingMemory 为 AstrBot 保存偏好、人物关系和聊天经历，结合关键词、语义与图谱召回。本仓库是 AKIhunter 维护的公开 fork，基于上游历史，纳入服务器已经使用的 2.9.0、OneID 与隐私能力，并在 2.10.0 增加可选长期保留。保留原作者 `lxfight`、贡献历史与许可证。
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Python-3.10%2B-52675c?style=flat-square" alt="Python 3.10 或更高">
-  <img src="https://img.shields.io/badge/AstrBot-4.24.2%2B-52675c?style=flat-square" alt="插件视图需要 AstrBot 4.24.2 或更高">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-52675c?style=flat-square" alt="AGPL-3.0"></a>
-</p>
+| 能做什么 | 插件行为 |
+| --- | --- |
+| 记住聊天经历 | 按对话轮次整理，支持手动总结、编辑、导入与导出 |
+| 找回过去的事实 | SQLite/BM25、向量与图谱融合召回，保留来源引用 |
+| 联合自己的多个平台账号 | OneID 绑定与解绑；检索始终经过身份和可见范围过滤 |
+| 避免独特经历被日常清理 | 长期保留开关保护独特事件、事实和变更历史 |
+| 压缩重复日常 | 相同来源、相同正文至少跨3天重复后，保留首条、末条、近期180天和每90天样本 |
+| 浏览和维护记忆 | 原生 dashboard 插件视图、2D/3D 图谱、配置、召回测试与备份 |
 
-## 让对话留下有用的记忆
+> **第一次使用**：先配置可用的 Embedding Provider 与 LLM Provider。长期保留默认关闭；启用不会恢复此前已经删除、遗忘或替代的记忆。
 
-LivingMemory 为 AstrBot 保存长期偏好、人物关系、项目进展和历史约定。它从对话中整理记忆，在需要时结合关键词、语义和图谱召回，并通过归档、衰减和访问强化管理记忆生命周期。
+1. 在 AstrBot 插件市场通过本仓库地址安装，或解压 [Release 插件包](https://github.com/AKIhunter/astrbot_plugin_livingmemory/releases) 到 `data/plugins/astrbot_plugin_livingmemory`。
+2. 在宿主「模型提供商」配置 Embedding 与 LLM，再将其 Provider ID 填入插件配置。推荐原生 `dashscope_embedding`、`text-embedding-v4`；切换模型或维度前备份并按原索引迁移流程处理。
+3. 打开「插件 → LivingMemory → 视图 → dashboard」，发送正常对话或手动总结，再测试召回。
+4. 如需长期保留，打开配置的「自动清理设置 → 长期记忆保留」，保存并重载此插件。
 
-> **最新稳定版：2.8.4**<br>
-> 修复 3D 图谱加载，完善 SQLite 故障诊断，并明确时间戳写入错误的宿主升级方法。<br>
-> [下载 2.8.4](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases/tag/2.8.4) · [版本与升级](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/releases) · [历史版本](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases)
+目录：[使用流程](#使用流程) · [长期保留配置](#长期保留配置) · [运行与失败边界](#运行与失败边界) · [集成](#集成) · [常见问题](#常见问题) · [兼容与隐私](#兼容与隐私) · [命令](#命令) · [更新与测试数据](#更新与测试数据)
 
-## 从记住，到想起来
+## 使用流程
 
-- **自动整理** — 达到配置的对话轮次后生成长期记忆；重要记录可保留原文，方便核验和重新总结。
-- **按上下文召回** — 文档与图谱都支持关键词和向量检索，融合排序后结合会话、人格和生命周期筛选。
-- **主动回忆与写入** — Agent 可调用 `recall_long_term_memory` 和 `memorize_long_term_memory`，按需读写长期记忆。
-- **看得见、可维护** — 在官方插件视图中浏览 2D/3D 图谱、点击节点变焦并查看关联记忆，以及编辑记忆、测试召回、管理提示词和查看系统状态。
+自动整理、主动工具读写和 dashboard 管理共用原生记忆引擎。页面可以管理记忆、提示词、身份绑定和系统状态；外观支持 Editorial、Studio、Paper 与 Terminal，浅色/深色/自动模式偏好保存在浏览器。
 
-## 一个工作区，四种风格
+既有 OneID 页面行为在本版本保留，绑定审核与事务校验没有整体重做。本版本没有纳入尚在开发的绑定流程与图谱改版。
 
-**Editorial · 原野** 的绿色网格，**Studio · 轻盈** 的柔和卡片，**Paper · 书页** 的暖纸色与衬线标题，或 **Terminal · 终端** 的等宽字体和仪表布局。
+## 长期保留配置
 
-每种风格均支持浅色、深色与自动模式。点击管理页面的「外观与主题」即时切换，偏好保存在当前浏览器。放大图谱时标签保持稳定，手机端也能筛选会话、定位记忆和完成管理操作。
+配置路径为 `forgetting_agent`；原有年龄、重要性和自动归档设置继续生效。
 
-3D 图谱使用独立的暖光空间，支持旋转、缩放、节点聚焦和关联记忆查看；大量节点与关系通过 GPU 批量绘制。
+| 字段 | 默认 | 含义 |
+| --- | --- | --- |
+| `long_term_retention_enabled` | `false` | 在原生低重要性清理候选中应用保护规则 |
+| `retention_recent_days` | `180` | 重复日常近期完整保留天数 |
+| `retention_sample_days` | `90` | 更早日常每个时间段至少保留一条 |
+| `retention_min_occurrences` | `3` | 至少出现在3个不同日期才允许压缩 |
+| `retention_atom_days` | `3650` | 活跃长期原子的最低TTL天数 |
 
-[查看主题与操作指南 →](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/webui)
+唯一正文、无法证明来源/时间的记录，以及标注为事实、关系或偏好的父记忆保守保留。不同账号、会话、机器人、人格、受众与敏感等级不会相互提供重复证据。只删除正文开头的记录日期参与比较，正文内数字、姓名、日期和否定词保留。
 
-## 开始使用
+活跃且尚未到期的事实、关系、偏好与已发生事件可延长期限；计划和 unknown 仍按原规则到期。初始化以创建时间计算，不因重载无限续期；正常访问强化遵守既有生命周期。详见[代码逻辑、启用与回滚](docs/long-term-retention.md)。
 
-1. 从 AstrBot 插件市场安装，或将指定版本的插件代码放入 `data/plugins/astrbot_plugin_livingmemory`。
-2. 先在 AstrBot 后台「模型提供商 → 嵌入」中创建并启用 Embedding Provider（推荐免费的 `BAAI/bge-m3`，见[配置步骤](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/guide/embedding-model)），再重载 AstrBot 并在 LivingMemory 配置中填写其 ID 与 LLM Provider；Embedding 留空只会回退到第一个可用 Provider，容易选错或导致向量/图索引初始化失败。
-3. 打开 `插件 → LivingMemory → 视图 → dashboard`（旧版 AstrBot 显示为 `Pages`）。插件视图需要 **AstrBot 4.24.2 或更高版本**。
+## 运行与失败边界
 
-测试版请从上方指定标签下载，具体安装及回退步骤见[版本与升级](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/releases)。已有数据时，升级前保留插件数据与配置备份。
+写入先完成原生存储、图谱与索引同步；召回经过身份过滤、会话/人格范围、融合排序及生命周期筛选。合法来源是身份判断的基础，未知来源不会被当成已授权身份。
 
-发送几轮对话后，用 `/lmem status` 查看状态、`/lmem summarize` 手动总结、`/lmem search 关键词` 检查召回。
+Provider 不可用时不保证生成或召回成功。没有配置 Embedding ID 时宿主可能回退到首个可用提供商，应明确配置并测试。关闭长期保留不会自动缩短已延长原子的期限；手动删除和遗忘不受保护开关阻止。不要在生产中用五年衰减实验强制清理真实历史。
 
-## 免费的嵌入模型
+## 集成
 
-LivingMemory 的语义召回依赖 Embedding Provider，推荐硅基流动当前免费的 `BAAI/bge-m3`（1024 维）。在 AstrBot「模型提供商 → 嵌入 → 新增模型提供商 → OpenAI Embedding」中填写：
+Agent 可使用 `recall_long_term_memory`、`memorize_long_term_memory` 与遗忘工具；其他插件应调用授权的原生接口，固定资料保存在知识库，动态经历保存在 LivingMemory。统一向量缓存的接入与计量见[说明](docs/shared-embedding-cache.md)。
 
-- Provider ID：保留 AstrBot 生成的值，如 `openai_embedding`
-- API Base URL：`https://api.siliconflow.cn/v1`
-- API Key：硅基流动控制台创建的密钥
-- 嵌入模型：`BAAI/bge-m3`
-- 嵌入维度：`1024`
+## 常见问题
 
-保存并点击测试后，把该 Provider ID 填入 LivingMemory 的 `provider_settings.embedding_provider_id`。模型 ID 与 Provider ID 不同，完整说明见[嵌入模型与 BGE-M3](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/guide/embedding-model)。
+- **以前删除的内容会回来吗？** 不会；开关保护当前仍存在的记录，不重建已经删除的数据。
+- **为什么五年后不是100%？** 冻结合成测试仍有日期定位、跨条综合与生成错误；不是独立盲测或真实用户效果保证。
+- **同一账号绑定后能跨群读私聊吗？** 绑定不绕过受众、敏感性、白名单、人格和来源限制。
+- **模型费用是多少？** 没有配置单价时列出 Token，用量费用标为「待确认」。
+- **为什么记忆总数不等于原子数？** 一个父记忆可生成多个原子，原子生命周期和父记录保留分别管理。
 
-## 继续了解
+## 兼容性与隐私
 
-[快速开始](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/guide/getting-started) · [配置参考](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/configuration) · [命令速查](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/commands) · [技术架构](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/architecture) · [更新记录](CHANGELOG.md)
+源码推荐 AstrBot **4.24.2+**；本次生产验收目标为 **4.29.1 / Python 3.12**，其他宿主版本没有在本次生产联调中全面覆盖。升级前备份数据、配置与两份向量索引；不重置现有索引。
 
-从 v1.4.0–v1.4.2 升级时，请先查看[备份与迁移说明](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/configuration#备份迁移与清理)。
+公开测试只使用合成账号与语料。真实记忆、数据库、运行配置、密钥、日志和向量缓存不进入仓库或 Release。公共平台检索必须使用明确授权的公开范围，授权失败时不能回退到私有记忆。
 
----
+## 使用指令
 
-社区支持：QQ 二群 `1129994749`（新群） · [QQ 一群 953245617](https://qm.qq.com/cgi-bin/qm/qr?k=WdyqoP-AOEXqGAN08lOFfVSguF2EmBeO&jump_from=webapi&authKey=tPyfv90TVYSGVhbAhsAZCcSBotJuTTLf03wnn7/lQZPUkWfoQ/J8e9nkAipkOzwh)（已满） · 口令：`lxfight`<br>
-开源许可证：[AGPL-3.0](LICENSE)
+| 入口 | 用途 |
+| --- | --- |
+| `/lmem status` | 查看插件状态 |
+| `/lmem summarize` | 手动整理当前聊天 |
+| `/lmem search 关键词` | 检查召回 |
+| 原生 `dashboard` 视图 | 配置、记忆、身份与图谱管理 |
+
+更多命令见[命令文档](docs/commands.md)；管理操作遵守宿主权限。
+
+## 更新日志与测试数据
+
+2.10.0 新增可选长期保留，并公开本维护分支已上线 OneID/隐私能力。[完整更新日志](CHANGELOG.md) · [五年实验与复现入口](benchmarks/five-year-20261106/README.md)。
+
+历史三组语义准确率：旧衰减 **44.4%**、优化保留 **89.8%**、全部保留 **90.7%**。优化组保留18,260条中的3,580条；严格分为84.3%，正例证据齐全@5为88.1%。原定90%目标仍差1题，不能称已达到。正式候选324题证据对应核查另行记录。
+
+社区支持：QQ 二群 `1129994749` · [QQ 一群 953245617](https://qm.qq.com/)（已满） · 口令：`lxfight`。

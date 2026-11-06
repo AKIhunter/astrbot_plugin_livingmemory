@@ -1,3 +1,4 @@
+# 旧绑定写入口也更新统一身份修订号，不能绕过撤销传播。
 """人物绑定与绑定审计的持久化层（阶段 1：身份与受众底座）。
 
 设计口径（与方案文档一致）：
@@ -18,6 +19,8 @@ from uuid import uuid4
 import aiosqlite
 
 from astrbot.api import logger
+from ..core.identity_keys import canonical_account, identity_alias, normalize_platform
+from .oneid_store import OneIdStoreMixin, IdentityConflict
 
 BINDING_STATUS_ACTIVE = "active"
 BINDING_STATUS_REVOKED = "revoked"
@@ -123,7 +126,7 @@ def _json(value: Any) -> str:
     return json.dumps(value if isinstance(value, (dict, list)) else {}, ensure_ascii=False)
 
 
-class IdentityStore:
+class IdentityStore(OneIdStoreMixin):
     """person_binding / binding_audit 的读写入口（与 livingmemory.db 共用文件）。"""
 
     def __init__(self, db_path: str):
@@ -139,6 +142,12 @@ class IdentityStore:
         if db is not None:
             yield db
             return
+        provider = getattr(self, "_transaction_provider", None)
+        if provider is not None:
+            async with provider() as connection:
+                yield connection
+            await self._identity_committed()
+            return
         async with aiosqlite.connect(self.db_path) as connection:
             connection.row_factory = aiosqlite.Row
             await connection.execute("BEGIN IMMEDIATE")
@@ -148,38 +157,29 @@ class IdentityStore:
             except BaseException:
                 await connection.rollback()
                 raise
+        await self._identity_committed()
 
     async def initialize(self) -> None:
         async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
             await db.execute("PRAGMA journal_mode = WAL")
             for statement in _BINDING_SCHEMA:
                 await db.execute(statement)
             await db.commit()
+            await self._initialize_oneid(db)
         logger.info("[IdentityStore] person_binding / binding_audit 已就绪")
 
     # ---------------------------------------------------------------- 读取
     async def find_active(self, platform: str, account_id: str) -> dict[str, Any] | None:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                """
-                SELECT * FROM person_binding
-                WHERE platform = ? AND account_id = ? AND status = 'active'
-                ORDER BY version DESC LIMIT 1
-                """,
-                (str(platform), str(account_id)),
-            )
-            row = await cursor.fetchone()
-            return dict(row) if row else None
+            return await self._active_for_key(db, canonical_account(platform, account_id))
 
     async def resolve_person(self, platform: str, account_id: str) -> str:
         """当前 active 绑定 → person_id；未绑定时按来源账号稳定派生，不做猜测合并。"""
         if not platform or not account_id:
             return ""
-        binding = await self.find_active(platform, account_id)
-        if binding:
-            return str(binding.get("person_id") or "")
-        return f"person:{platform}:{account_id}"
+        return await self.resolve_one_id(platform, account_id)
 
     async def accounts_for(self, person_id: str) -> list[dict[str, Any]]:
         if not person_id:
@@ -212,8 +212,8 @@ class IdentityStore:
             clauses.append("person_id = ?")
             params.append(str(person_id))
         if platform:
-            clauses.append("platform = ?")
-            params.append(str(platform).lower())
+            clauses.append("substr(canonical_account,1,instr(canonical_account,':')-1) = ?")
+            params.append(normalize_platform(platform))
         if account_id:
             clauses.append("account_id = ?")
             params.append(str(account_id))
@@ -320,7 +320,8 @@ class IdentityStore:
     async def upsert_binding(
         self,
         *,
-        person_id: str,
+        person_id: str = "",
+        one_id: str = "",
         platform: str,
         account_id: str,
         display_name: str = "",
@@ -338,34 +339,27 @@ class IdentityStore:
         _db: aiosqlite.Connection | None = None,
     ) -> dict[str, Any]:
         """按 (platform, account_id) 幂等 upsert；人物变化时版本化并保留旧行。"""
-        person_id = str(person_id or "").strip()
-        platform = str(platform or "").strip().lower()
-        account_id = str(account_id or "").strip()
-        if not person_id or not platform or not account_id:
-            raise ValueError("person_id / platform / account_id 均不能为空")
+        person_id = identity_alias(one_id=one_id, person_id=person_id)
+        key = canonical_account(platform, account_id)
+        platform, account_id = key.split(":", 1)
 
         now = self._now()
         async with self._transaction(_db) as db:
-            cursor = await db.execute(
-                """
-                SELECT * FROM person_binding
-                WHERE platform = ? AND account_id = ? AND status = 'active'
-                ORDER BY version DESC LIMIT 1
-                """,
-                (platform, account_id),
-            )
-            active = await cursor.fetchone()
-            active = dict(active) if active else None
+            active = await self._active_for_key(db, key)
             if expected_binding is not None and (active or {}) != expected_binding:
                 raise ValueError("绑定已变化，请刷新后重新编辑")
+            await db.execute(
+                "INSERT OR IGNORE INTO oneid_entity VALUES(?,'unknown','',?,?)",
+                (person_id, now, now),
+            )
 
             if active is None:
                 cursor = await db.execute(
                     """
                     SELECT COALESCE(MAX(version), 0) AS max_version
-                    FROM person_binding WHERE platform = ? AND account_id = ?
+                    FROM person_binding WHERE canonical_account = ?
                     """,
-                    (platform, account_id),
+                    (key,),
                 )
                 max_version = int((await cursor.fetchone())["max_version"] or 0)
                 binding = {
@@ -386,6 +380,7 @@ class IdentityStore:
                     "note": note,
                     "created_at": now,
                     "updated_at": now,
+                    "canonical_account": key,
                 }
                 await db.execute(
                     """
@@ -393,11 +388,12 @@ class IdentityStore:
                         binding_id, person_id, platform, account_id, display_name,
                         status, version, source, evidence_type, evidence_ref,
                         operator, reviewer, valid_from, valid_to, note,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        created_at, updated_at, canonical_account
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     tuple(binding.values()),
                 )
+                await self._identity_changed(db, key)
                 await self._append_audit(
                     db, action="create", binding_id=binding["binding_id"],
                     version=binding["version"], before={}, after=binding,
@@ -444,6 +440,7 @@ class IdentityStore:
                         source, operator, reviewer, now, active["binding_id"],
                     ),
                 )
+                await self._identity_changed(db, key)
                 await self._append_audit(
                     db, action="update", binding_id=active["binding_id"],
                     version=int(active["version"]), before=active, after=updated,
@@ -458,9 +455,9 @@ class IdentityStore:
             cursor = await db.execute(
                 """
                 SELECT COALESCE(MAX(version), 0) AS max_version
-                FROM person_binding WHERE platform = ? AND account_id = ?
+                FROM person_binding WHERE canonical_account = ?
                 """,
-                (platform, account_id),
+                (key,),
             )
             max_version = int((await cursor.fetchone())["max_version"] or 0)
             await db.execute(
@@ -495,11 +492,12 @@ class IdentityStore:
                     binding_id, person_id, platform, account_id, display_name,
                     status, version, source, evidence_type, evidence_ref,
                     operator, reviewer, valid_from, valid_to, note,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, updated_at, canonical_account
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                tuple(new_binding.values()),
+                self._binding_values(new_binding),
             )
+            await self._identity_changed(db, key)
             await self._append_audit(
                 db, action="merge", binding_id=new_binding["binding_id"],
                 version=new_binding["version"], before=active, after=new_binding,
@@ -541,6 +539,8 @@ class IdentityStore:
                 """,
                 (now, now, str(binding_id)),
             )
+            await self._identity_changed(db, before["canonical_account"], invalidation="cancelled")
+            # 旧待审项同样终结；迟到审核不能恢复撤销的账号关系。
             await self._append_audit(
                 db, action="revoke", binding_id=str(binding_id),
                 version=int(before["version"]), before=before, after=after,
@@ -571,13 +571,17 @@ class IdentityStore:
             if not current:
                 return None
             current = dict(current)
+            # 历史行不能充当当前版本；撤销后必须走显式的新申请。
+            active_current = await self._active_for_key(db, current["canonical_account"])
+            if not active_current or active_current["binding_id"] != str(binding_id):
+                raise IdentityConflict("历史或已解绑关系不能直接回滚，请创建新申请")
             cursor = await db.execute(
                 """
                 SELECT * FROM person_binding
-                WHERE platform = ? AND account_id = ? AND version = ?
+                WHERE canonical_account = ? AND version = ?
                 ORDER BY created_at DESC LIMIT 1
                 """,
-                (current["platform"], current["account_id"], int(to_version)),
+                (current["canonical_account"], int(to_version)),
             )
             target = await cursor.fetchone()
             if not target:
@@ -625,11 +629,12 @@ class IdentityStore:
                     binding_id, person_id, platform, account_id, display_name,
                     status, version, source, evidence_type, evidence_ref,
                     operator, reviewer, valid_from, valid_to, note,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, updated_at, canonical_account
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                tuple(restored.values()),
+                self._binding_values(restored),
             )
+            await self._identity_changed(db, current["canonical_account"])
             await self._append_audit(
                 db, action="rollback", binding_id=restored["binding_id"],
                 version=restored["version"], before=dict(active) if active else {}, after=restored,
@@ -637,6 +642,15 @@ class IdentityStore:
                 reviewer_id=reviewer, reason=reason, request_id=request_id,
             )
             return restored
+
+    @staticmethod
+    def _binding_values(row: dict) -> tuple:
+        """原有 17 列顺序保持，最后追加规范账号辅助列。"""
+        return tuple(row[name] for name in (
+            "binding_id", "person_id", "platform", "account_id", "display_name", "status",
+            "version", "source", "evidence_type", "evidence_ref", "operator", "reviewer",
+            "valid_from", "valid_to", "note", "created_at", "updated_at", "canonical_account",
+        ))
 
     # ---------------------------------------------------------------- 绑定设置
     async def get_settings(self) -> dict[str, Any]:
@@ -711,7 +725,8 @@ class IdentityStore:
     async def submit_candidate(
         self,
         *,
-        person_id: str,
+        person_id: str = "",
+        one_id: str = "",
         platform: str,
         account_id: str,
         display_name: str = "",
@@ -725,11 +740,9 @@ class IdentityStore:
         request_id: str = "",
     ) -> dict[str, Any]:
         """自动识别结果入待审队列；auto_approve 关闭时不会直接改正式绑定。"""
-        person_id = str(person_id or "").strip()
-        platform = str(platform or "").strip().lower()
-        account_id = str(account_id or "").strip()
-        if not person_id or not platform or not account_id:
-            raise ValueError("person_id / platform / account_id 均不能为空")
+        person_id = identity_alias(one_id=one_id, person_id=person_id)
+        account_key = canonical_account(platform, account_id)
+        platform, account_id = account_key.split(":", 1)
         now = self._now()
         async with self._transaction() as db:
             cursor = await db.execute(
@@ -803,6 +816,14 @@ class IdentityStore:
                     """,
                     tuple(candidate.values()),
                 )
+                account_revision = await self._account_revision(db, account_key)
+                active_snapshot = await self._active_for_key(db, account_key)
+                snapshot_json = json.dumps(active_snapshot or {}, ensure_ascii=False, sort_keys=True)
+                await db.execute(
+                    "UPDATE binding_candidate SET account_revision=?,binding_snapshot_json=? "
+                    "WHERE candidate_id=?", (account_revision, snapshot_json, candidate["candidate_id"]),
+                )
+                candidate.update(account_revision=account_revision, binding_snapshot_json=snapshot_json)
                 action = "candidate_submit"
                 before = {}
             await self._append_audit(
@@ -814,7 +835,7 @@ class IdentityStore:
             )
 
         settings = await self.get_settings()
-        if settings.get("auto_approve"):
+        if settings.get("auto_approve") and candidate.get("account_revision", 0) == 0:
             reviewed = await self.review_candidate(
                 candidate["candidate_id"], approve=True,
                 reviewer="auto_approve",
@@ -882,9 +903,22 @@ class IdentityStore:
             # 同一候选 ID 会被自动识别更新；锁内核对人审看到的全部字段。
             if candidate != expected_candidate:
                 raise ValueError("候选已变化，请刷新后重新审核")
+            key = canonical_account(candidate["platform"], candidate["account_id"])
+            active = await self._active_for_key(db, key)
+            if (
+                await self._account_revision(db, key) != candidate["account_revision"]
+                or (active or {}) != json.loads(candidate["binding_snapshot_json"])
+            ):
+                raise IdentityConflict("候选账号归属已变化，请使用新申请")
+            if approve and active is None and candidate["account_revision"] > 0:
+                raise IdentityConflict("已解绑账号必须通过新的 one_id 申请重新绑定")
             now = self._now()
             binding = None
             if approve:
+                await db.execute(
+                    "UPDATE binding_candidate SET status='approved' WHERE candidate_id=?",
+                    (str(candidate_id),),
+                )
                 binding = await self.upsert_binding(
                     person_id=candidate["person_id"],
                     platform=candidate["platform"],
@@ -899,6 +933,7 @@ class IdentityStore:
                     channel=channel,
                     reason=reason,
                     request_id=request_id,
+                    expected_binding=active or {},
                     _db=db,
                 )
             status = BINDING_STATUS_APPROVED if approve else BINDING_STATUS_REJECTED
@@ -914,7 +949,7 @@ class IdentityStore:
                 """
                 UPDATE binding_candidate
                 SET status = ?, reviewed_by = ?, review_reason = ?, reviewed_at = ?, updated_at = ?
-                WHERE candidate_id = ? AND status = 'pending'
+                WHERE candidate_id = ?
                 """,
                 (status, reviewer, reason, now, now, str(candidate_id)),
             )
@@ -1015,11 +1050,9 @@ class IdentityStore:
         seen: set[tuple[str, str]] = set()
         normalized = []
         for index, row in enumerate(rows):
-            person_id = str(row.get("person_id") or "").strip()
-            platform = str(row.get("platform") or "").strip().lower()
-            account_id = str(row.get("account_id") or "").strip()
-            if not person_id or not platform or not account_id:
-                raise ValueError(f"第 {index + 1} 行缺少 person_id/platform/account_id")
+            person_id = identity_alias(one_id=row.get("one_id"), person_id=row.get("person_id"))
+            key = canonical_account(row.get("platform"), row.get("account_id"))
+            platform, account_id = key.split(":", 1)
             if (platform, account_id) in seen:
                 raise ValueError(f"第 {index + 1} 行账号重复，请合并后重新上传")
             seen.add((platform, account_id))
@@ -1030,7 +1063,9 @@ class IdentityStore:
         async with self._transaction() as db:
             cursor = await db.execute("SELECT * FROM person_binding WHERE status = 'active'")
             active_rows = [dict(row) for row in await cursor.fetchall()]
-            active_map = {(item["platform"], item["account_id"]): item for item in active_rows}
+            active_map = {
+                tuple(item["canonical_account"].split(":", 1)): item for item in active_rows
+            }
             if len(active_map) != len(active_rows):
                 raise ValueError("现有绑定存在重复生效账号，请先人工复核")
             if mode == "replace":
@@ -1070,7 +1105,7 @@ class IdentityStore:
                     result["unchanged"] += 1
             if mode == "replace":
                 for active in active_rows:
-                    if (active["platform"], active["account_id"]) not in seen:
+                    if tuple(active["canonical_account"].split(":", 1)) not in seen:
                         if await self.revoke_binding(
                             active["binding_id"], operator=operator, reviewer=reviewer,
                             reason=reason, channel=channel, request_id=request_id,

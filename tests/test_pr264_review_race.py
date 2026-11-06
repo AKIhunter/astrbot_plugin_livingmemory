@@ -439,6 +439,7 @@ async def test_trim_keeps_inflight_summary_memory(tmp_path):
     engine = AsyncMock()
     engine.add_memory = AsyncMock(return_value=4242)
     engine.delete_memory = AsyncMock(return_value=True)
+    engine.find_similar_memory = AsyncMock(return_value=None)
     handler, manager, store = await _make_real_handler(tmp_path, memory_engine=engine)
     sid = SID_PREFIX + "trim-memory"
     entered = asyncio.Event()
@@ -518,22 +519,23 @@ async def test_cancel_after_memory_write_compensates(tmp_path):
     engine = AsyncMock()
     engine.add_memory = AsyncMock(return_value=4242)
     engine.delete_memory = AsyncMock(return_value=True)
+    engine.find_similar_memory = AsyncMock(return_value=None)
     handler, manager, store = await _make_real_handler(tmp_path, memory_engine=engine)
     sid = SID_PREFIX + "cancel-compensate"
     committing = asyncio.Event()
-    original_conditional = manager.update_session_metadata_if_revision
+    original_conditional = manager.commit_summary_cursor
     task = None
     try:
         await _seed_turns(manager, sid, ("C1", "C2"))
 
-        async def slow_conditional(session_id, key, value, expected_revision):
+        async def slow_conditional(session_id, last_message, expected_revision):
             committing.set()
             await asyncio.sleep(30)  # 停在游标提交处，等待被取消
             return await original_conditional(
-                session_id, key, value, expected_revision
+                session_id, last_message, expected_revision
             )
 
-        manager.update_session_metadata_if_revision = slow_conditional
+        manager.commit_summary_cursor = slow_conditional
         handler._memory_reflection.memory_processor.process_conversation = AsyncMock(
             return_value=("summary", {"topics": []}, 0.5)
         )
@@ -578,7 +580,7 @@ async def test_cancel_after_memory_write_compensates(tmp_path):
 
         engine.delete_memory.assert_awaited_once_with(4242)
     finally:
-        manager.update_session_metadata_if_revision = original_conditional
+        manager.commit_summary_cursor = original_conditional
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -596,6 +598,7 @@ async def test_rollback_during_memory_write_compensates(tmp_path):
     engine = AsyncMock()
     engine.add_memory = AsyncMock(return_value=4242)
     engine.delete_memory = AsyncMock(return_value=True)
+    engine.find_similar_memory = AsyncMock(return_value=None)
     handler, manager, store = await _make_real_handler(tmp_path, memory_engine=engine)
     sid = SID_PREFIX + "compensate"
     entered = asyncio.Event()

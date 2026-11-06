@@ -1,7 +1,15 @@
 name: astrbot_plugin_livingmemory
 display_name: LivingMemory
 author: lxfight
-version: 2.8.4
-desc: 为 AstrBot 打造的、拥有完整记忆生命周期的智能长期记忆插件（v2.0 重构版）。
-short_desc: 拥有完整记忆生命周期的智能长期记忆插件
+version: 2.10.0
+desc: >-
+  为 AstrBot 保存偏好、关系和聊天经历，结合关键词、语义与图谱召回。
+  本维护分支提供 OneID 身份隔离、隐私保护及可选长期保留；只压缩重复日常。
+short_desc: 支持身份隔离与长期保留的动态聊天记忆
 repo: https://github.com/AKIhunter/astrbot_plugin_livingmemory
+help: >-
+  入口：插件视图 dashboard；命令：/lmem status、/lmem summarize、/lmem search。
+  支持记忆管理、2D/3D图谱、OneID绑定与长期保留配置。
+astrbot_version: ">=4.24.2"
+social_link: https://github.com/AKIhunter
+tags: [记忆, OneID, WebUI, 长期保留]

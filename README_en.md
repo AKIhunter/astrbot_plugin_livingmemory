@@ -2,13 +2,15 @@
   <a href="README.md">中文</a> · <strong>English</strong> · <a href="README_ru.md">Русский</a>
 </p>
 
+> Maintained fork: 2.10.0 preserves deployed OneID/privacy behavior and adds optional long-term retention (disabled by default). Historical semantic accuracy is 89.8%; the 90% goal was missed by one question. [Benchmark](benchmarks/five-year-20261106/README.md).
+
 ![LivingMemory: long-term memory connecting preferences, people, plans and context](docs/public/images/livingmemory-cover.svg)
 
 <p align="center">
-  <a href="https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/"><strong>Documentation</strong></a> ·
-  <a href="https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/webui"><strong>Dashboard</strong></a> ·
-  <a href="https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases"><strong>Downloads</strong></a> ·
-  <a href="https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/issues"><strong>Issues</strong></a>
+  <a href="https://github.com/AKIhunter/astrbot_plugin_livingmemory/blob/main/docs/en.md"><strong>Documentation</strong></a> ·
+  <a href="https://github.com/AKIhunter/astrbot_plugin_livingmemory/blob/main/docs/en/webui.md"><strong>Dashboard</strong></a> ·
+  <a href="https://github.com/AKIhunter/astrbot_plugin_livingmemory/releases"><strong>Downloads</strong></a> ·
+  <a href="https://github.com/AKIhunter/astrbot_plugin_livingmemory/issues"><strong>Issues</strong></a>
 </p>
 
 <p align="center">
@@ -21,9 +23,9 @@
 
 LivingMemory gives AstrBot a durable store of preferences, relationships, project progress and past agreements. It summarizes conversations, recalls relevant context through keywords, vectors and a graph, and manages memory through archiving, decay and access reinforcement.
 
-> **Latest stable: 2.8.4**<br>
+> **Latest stable: 2.10.0**<br>
 > Fixes authenticated 3D loading, adds native SQLite diagnostics, and documents the host upgrade for timestamp write failures.<br>
-> [Download 2.8.4](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases/tag/2.8.4) · [Releases and upgrades](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/releases) · [Earlier releases](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases)
+> [Download 2.10.0](https://github.com/AKIhunter/astrbot_plugin_livingmemory/releases/tag/2.10.0) · [Releases and upgrades](https://github.com/AKIhunter/astrbot_plugin_livingmemory/blob/main/docs/en/releases.md) · [Earlier releases](https://github.com/AKIhunter/astrbot_plugin_livingmemory/releases)
 
 ## From remembering to recalling
 
@@ -40,15 +42,15 @@ Every style supports light, dark and automatic modes. Switch from “Appearance�
 
 The 3D graph has an independent warm-lit scene with rotation, zoom, node focus and associated memories. GPU batches render large sets of nodes and relationships.
 
-[Explore themes and workflows →](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/webui)
+[Explore themes and workflows →](https://github.com/AKIhunter/astrbot_plugin_livingmemory/blob/main/docs/en/webui.md)
 
 ## Get started
 
 1. Install from the AstrBot plugin marketplace, or place the selected version under `data/plugins/astrbot_plugin_livingmemory`.
-2. Create and enable an Embedding Provider in AstrBot's Model Providers → Embedding page first (the free `BAAI/bge-m3` setup is documented [here](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/guide/embedding-model)), then reload AstrBot and fill in its ID plus the LLM provider in LivingMemory. Leaving the embedding field empty only falls back to the first available provider, which can pick the wrong model or break vector/graph index initialization.
+2. Create and enable an Embedding Provider in AstrBot's Model Providers → Embedding page first (the free `BAAI/bge-m3` setup is documented [here](https://github.com/AKIhunter/astrbot_plugin_livingmemory/blob/main/docs/en/guide/embedding-model.md)), then reload AstrBot and fill in its ID plus the LLM provider in LivingMemory. Leaving the embedding field empty only falls back to the first available provider, which can pick the wrong model or break vector/graph index initialization.
 3. Open `Plugins → LivingMemory → Views → dashboard` (`Pages` in older AstrBot releases). Plugin views require **AstrBot 4.24.2 or later**.
 
-For the beta, download the specific tag above and follow [installation and rollback steps](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/releases). Back up existing plugin data and configuration before upgrading.
+For the beta, download the specific tag above and follow [installation and rollback steps](https://github.com/AKIhunter/astrbot_plugin_livingmemory/blob/main/docs/en/releases.md). Back up existing plugin data and configuration before upgrading.
 
 After a few conversation turns, use `/lmem status`, `/lmem summarize` and `/lmem search your keywords` to check the pipeline.
 
@@ -62,13 +64,13 @@ LivingMemory's semantic recall depends on an Embedding Provider. The free `BAAI/
 - Embedding Model: `BAAI/bge-m3`
 - Embedding Dimensions: `1024`
 
-Save and test the provider, then set `provider_settings.embedding_provider_id` in LivingMemory to that Provider ID. The model ID and Provider ID are different; see [Embedding Models and BGE-M3](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/guide/embedding-model) for the full guide.
+Save and test the provider, then set `provider_settings.embedding_provider_id` in LivingMemory to that Provider ID. The model ID and Provider ID are different; see [Embedding Models and BGE-M3](https://github.com/AKIhunter/astrbot_plugin_livingmemory/blob/main/docs/en/guide/embedding-model.md) for the full guide.
 
 ## Keep exploring
 
-[Quick start](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/guide/getting-started) · [Configuration](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/configuration) · [Commands](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/commands) · [Architecture](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/architecture) · [Changelog](CHANGELOG.md)
+[Quick start](https://github.com/AKIhunter/astrbot_plugin_livingmemory/blob/main/docs/en/guide/getting-started.md) · [Configuration](https://github.com/AKIhunter/astrbot_plugin_livingmemory/blob/main/docs/en/configuration.md) · [Commands](https://github.com/AKIhunter/astrbot_plugin_livingmemory/blob/main/docs/en/commands.md) · [Architecture](https://github.com/AKIhunter/astrbot_plugin_livingmemory/blob/main/docs/en/architecture.md) · [Changelog](CHANGELOG.md)
 
-Upgrading from v1.4.0–v1.4.2? Read the [backup and migration guide](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/configuration#backup-migration-and-cleanup) first.
+Upgrading from v1.4.0–v1.4.2? Read the [backup and migration guide](https://github.com/AKIhunter/astrbot_plugin_livingmemory/blob/main/docs/en/configuration.md#backup-migration-and-cleanup) first.
 
 ---
 

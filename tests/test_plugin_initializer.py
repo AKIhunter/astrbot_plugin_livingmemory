@@ -22,6 +22,8 @@ def mock_context():
     context.get_provider_by_id = Mock(return_value=None)
     context.get_all_embedding_providers = Mock(return_value=[])
     context.get_using_provider = Mock(return_value=None)
+    context.get_config = Mock(return_value={"platform": []})
+    context.platform_manager.get_insts = Mock(return_value=[])
     return context
 
 
@@ -387,6 +389,14 @@ async def test_complete_initialization_wires_graph_db_and_engine_config(
             self.config = config or {}
             self.text_processor = Mock(async_init=AsyncMock())
 
+        @__import__("contextlib").asynccontextmanager
+        async def _write_transaction(self):
+            # IdentityStore协调接口要求；业务初始化断言保持不变。
+            yield None
+
+        def _invalidate_search_cache(self):
+            return None
+
         async def initialize(self):
             return None
 
@@ -555,6 +565,14 @@ async def test_complete_initialization_skips_graph_db_when_disabled(
             self.llm_provider = llm_provider
             self.config = config or {}
             self.text_processor = Mock(async_init=AsyncMock())
+
+        @__import__("contextlib").asynccontextmanager
+        async def _write_transaction(self):
+            # IdentityStore协调接口要求；真实事务由OneID集成测试覆盖。
+            yield None
+
+        def _invalidate_search_cache(self):
+            return None
 
         async def initialize(self):
             return None

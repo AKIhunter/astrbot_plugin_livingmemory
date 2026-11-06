@@ -35,7 +35,8 @@ export function imageStrip(metadata, compact = false) {
 }
 
 export function bindImageErrors(root) {
-  root?.querySelectorAll(".comment-image-preview img").forEach((image) => {
+  // 页面或测试宿主尚未提供 DOM 查询方法时，图片占位逻辑安全跳过。
+  root?.querySelectorAll?.(".comment-image-preview img").forEach((image) => {
     const fail = () => image.closest(".comment-image-preview")?.classList.add("is-unavailable");
     image.addEventListener("error", fail, { once: true });
     if (image.complete && !image.naturalWidth) fail();

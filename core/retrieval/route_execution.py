@@ -3,6 +3,7 @@
 import asyncio
 
 from astrbot.api import logger
+from .request_timing import measure
 
 
 async def search_route(name, awaitable, timeout=10.0):
@@ -17,7 +18,8 @@ async def search_route(name, awaitable, timeout=10.0):
         A pair of results and an optional exception. Cancellation propagates.
     """
     try:
-        return await asyncio.wait_for(awaitable, timeout=timeout), None
+        with measure("retrieval_" + name):
+            return await asyncio.wait_for(awaitable, timeout=timeout), None
     except asyncio.CancelledError:
         raise
     except Exception as exc:

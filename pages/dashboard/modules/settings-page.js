@@ -58,6 +58,7 @@ export class SettingsPage {
     this.state = state;
     this.api = apiClient;
     this.sections = [];
+    this.adapterOwnership = [];
     this._open = new Set();
     this._query = "";
     this._busy = false;
@@ -86,6 +87,7 @@ export class SettingsPage {
     try {
       const data = await this.api.get("config", { lang: this.currentLang() });
       this.sections = Array.isArray(data.sections) ? data.sections : [];
+      this.adapterOwnership = data.adapter_ownership || [];
       this.renderFeedback("");
       this.render();
     } catch (error) {
@@ -158,6 +160,7 @@ export class SettingsPage {
             '<div class="settings-subgroup-title">' +
             esc(section.title) +
             "</div>" +
+            (section.notice ? '<p class="settings-important" role="note">' + esc(section.notice) + "</p>" : "") +
             '<div class="settings-fields">' +
             fields.map((field) => this.renderField(field)).join("") +
             "</div>" +
@@ -190,6 +193,20 @@ export class SettingsPage {
       "</div>" +
       categoryHtml;
 
+    const ownership = this.adapterOwnership;
+    const adapterField = this.sections.flatMap(section => section.fields || [])
+      .find(field => field.type === "adapter-list");
+    if ((!query || window.t("settings.adapterOwnership").toLowerCase().includes(query)) && ownership.length && adapterField?.options?.length) {
+      const options = adapterField.options.map((id, i) => '<option value="' + esc(id) + '">' +
+        esc(adapterField.option_labels[i]) + '</option>').join("");
+      html += '<details class="settings-group"' + (query ? ' open' : '') + '><summary>' +
+        esc(window.t("settings.adapterOwnership")) + '</summary>' + ownership.map((row, i) =>
+        '<div class="adapter-ownership-row"><span>' + (row.adapter_id ? '' : esc(window.t("settings.adapterUnassigned")) + ' · ') + esc(row.adapter_id || row.session_id || window.t("settings.adapterUnknown")) +
+        ' · ' + esc(window.t('settings.adapterCount', row.count)) + '</span><select class="input" data-adapter-target="' + i + '">' +
+        options.replace('value="' + esc(row.adapter_id) + '"', 'value="' + esc(row.adapter_id) + '" selected') + '</select><button class="btn btn-secondary" data-adapter-assign="' + i + '"' + (row.adapter_id && adapterField.options.includes(row.adapter_id) ? ' disabled' : '') + '>' +
+        esc(window.t("settings.adapterAssign")) + '</button></div>'
+      ).join("") + '</details>';
+    }
     container.innerHTML =
       html ||
       '<p class="text-tertiary">' + esc(window.t("settings.noMatches")) + "</p>";
@@ -198,9 +215,17 @@ export class SettingsPage {
   renderField(field) {
     const path = esc(field.path);
     const common =
-      'data-setting-path="' + path + '" data-type="' + esc(field.type) + '"';
+      'id="setting-' + path + '" aria-label="' + esc(field.label) +
+      '" data-setting-path="' + path + '" data-type="' + esc(field.type) + '" ';
     let control = "";
-    if (field.type === "bool") {
+    if (field.type === "adapter-list") {
+      const selected = field.value ?? field.options;
+      control = '<fieldset class="adapter-options" aria-label="' + esc(field.label) + '" ' + common +
+        ' data-original="' + (field.value === null ? "null" : "set") + '">' + field.options.map((id, i) =>
+        '<label><input type="checkbox" value="' + esc(id) + '"' +
+        (selected.includes(id) ? ' checked' : '') + '> ' + esc(field.option_labels[i]) + '</label>'
+      ).join("") + '</fieldset>';
+    } else if (field.type === "bool") {
       control =
         '<input type="checkbox" ' + common + (field.value ? " checked" : "") + ">";
     } else if (Array.isArray(field.options)) {
@@ -252,7 +277,7 @@ export class SettingsPage {
     }
     return (
       '<div class="settings-field">' +
-      '<label class="settings-label">' + esc(field.label) + "</label>" +
+      '<label class="settings-label" for="setting-' + path + '">' + esc(field.label) + "</label>" +
       control +
       (field.hint ? '<div class="settings-hint">' + esc(field.hint) + "</div>" : "") +
       "</div>"
@@ -295,6 +320,30 @@ export class SettingsPage {
     const container = document.getElementById("settings-container");
     if (container && !container.dataset.bound) {
       container.dataset.bound = "1";
+      container.addEventListener("change", event => {
+        const group = event.target.closest('[data-type="adapter-list"]');
+        if (group) group.dataset.edited = "1";
+        if (event.target.dataset.adapterTarget !== undefined) {
+          const index = event.target.dataset.adapterTarget;
+          container.querySelector('[data-adapter-assign="' + index + '"]').disabled =
+            event.target.value === this.adapterOwnership[Number(index)].adapter_id;
+        }
+      });
+      container.addEventListener("click", async event => {
+        const button = event.target.closest("[data-adapter-assign]");
+        if (!button || button.disabled) return;
+        const index = Number(button.dataset.adapterAssign);
+        const row = this.adapterOwnership[index];
+        const target = container.querySelector('[data-adapter-target="' + index + '"]');
+        button.disabled = true;
+        try {
+          await this.api.post("adapters/assign", {adapter_id: target.value, source_adapter_id: row.adapter_id, session_id: row.session_id});
+          await this.fetch();
+        } catch (error) {
+          this.renderFeedback(error.message);
+          button.disabled = false;
+        }
+      });
       container.addEventListener(
         "toggle",
         (event) => {
@@ -315,7 +364,10 @@ export class SettingsPage {
     document.querySelectorAll("[data-setting-path]").forEach((element) => {
       const path = element.dataset.settingPath;
       const type = element.dataset.type;
-      if (type === "bool") {
+      if (type === "adapter-list") {
+        values[path] = element.dataset.original === "null" && !element.dataset.edited
+          ? null : Array.from(element.querySelectorAll('input:checked'), input => input.value);
+      } else if (type === "bool") {
         values[path] = Boolean(element.checked);
       } else if (type === "int") {
         const parsed = Number.parseInt(element.value, 10);

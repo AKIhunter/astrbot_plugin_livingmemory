@@ -862,15 +862,16 @@ async def test_memory_engine_atom_fallback_skips_previously_inserted_atoms(
     inserted_atom.atom_id = 42
     pending_atom = MemoryAtom(parent_memory_id=0, content="pending insert")
 
-    memory_id = await engine.add_memory(
-        content="fallback atom test",
-        session_id="s1",
-        persona_id="p1",
-        atoms=[inserted_atom, pending_atom],
-    )
-
-    assert memory_id > 0
-    engine.atom_store.insert.assert_awaited_once_with(pending_atom)
+    # 线上2.9.0将原子写失败向上游传播并回滚父记忆，不能回退成半写成功。
+    with pytest.raises(RuntimeError, match="batch failed"):
+        await engine.add_memory(
+            content="fallback atom test",
+            session_id="s1",
+            persona_id="p1",
+            atoms=[inserted_atom, pending_atom],
+        )
+    engine.atom_store.insert.assert_not_awaited()
+    assert not engine.faiss_db.docs
 
     await engine.close()
 

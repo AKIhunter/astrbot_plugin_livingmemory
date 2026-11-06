@@ -1,3 +1,4 @@
+# 图节点、入口和邻居均限制到 one_id 可见的原生记忆。
 """
 GraphStore 的 GraphStoreReadMixin 拆分模块
 自动从 storage/graph_store.py 拆分，保持行为不变
@@ -6,6 +7,9 @@ GraphStore 的 GraphStoreReadMixin 拆分模块
 from __future__ import annotations
 
 from typing import Any
+
+from ..core.memory_scope import adapter_sql
+from ..core.identity_access import identity_sql, identity_current
 
 import aiosqlite
 
@@ -102,6 +106,8 @@ class GraphStoreReadMixin:
         persona_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Search graph entries through the FTS table."""
+        if not await identity_current():
+            return []
         filters: list[str] = []
         params: list[Any] = [fts_query]
         if session_id is not None:
@@ -110,6 +116,12 @@ class GraphStoreReadMixin:
         if persona_id is not None:
             filters.append("ge.persona_id = ?")
             params.append(persona_id)
+        ownership, ownership_params = adapter_sql("ge.metadata")
+        filters.append(ownership)
+        params.extend(ownership_params)
+        identity_filter, identity_params = identity_sql("ge.source_memory_id")
+        filters.append(identity_filter)
+        params.extend(identity_params)
 
         where_clause = f"AND {' AND '.join(filters)}" if filters else ""
 
@@ -166,11 +178,21 @@ class GraphStoreReadMixin:
         self, tokens: list[str], limit: int = 20
     ) -> list[dict[str, Any]]:
         """Find graph nodes whose canonical values overlap query tokens."""
+        if not await identity_current():
+            return []
         normalized_tokens = list(dict.fromkeys(str(token).strip() for token in tokens))
         normalized_tokens = [token for token in normalized_tokens if token]
         if not normalized_tokens:
             return []
 
+        ownership, ownership_params = adapter_sql("ge.metadata")
+        identity_filter, identity_params = identity_sql("ge.source_memory_id")
+        node_filter = (
+            f"id IN (SELECT gen.node_id FROM graph_entry_nodes gen JOIN graph_entries ge ON ge.id=gen.entry_id WHERE {ownership} AND {identity_filter})"
+            if ownership_params or identity_params
+            else "1"
+        )
+        ownership_params.extend(identity_params)
         rows_by_id: dict[int, aiosqlite.Row] = {}
         async with self._read_connect() as db:
             db.row_factory = aiosqlite.Row
@@ -193,11 +215,11 @@ class GraphStoreReadMixin:
                     f"""
                     SELECT id, node_key, node_type, node_value, canonical_value, metadata
                     FROM graph_nodes
-                    WHERE {" OR ".join(clauses)}
+                    WHERE ({" OR ".join(clauses)}) AND {node_filter}
                     ORDER BY LENGTH(canonical_value) ASC
                     LIMIT ?
                     """,
-                    (*params, limit),
+                    (*params, *ownership_params, limit),
                 )
                 batch_rows = await cursor.fetchall()
                 for row in batch_rows:
@@ -228,6 +250,8 @@ class GraphStoreReadMixin:
         persona_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Expand one hop from matched nodes to their linked entries."""
+        if not await identity_current():
+            return []
         if not node_ids:
             return []
 
@@ -241,6 +265,12 @@ class GraphStoreReadMixin:
         if persona_id is not None:
             filters.append("ge.persona_id = ?")
             params.append(persona_id)
+        ownership, ownership_params = adapter_sql("ge.metadata")
+        filters.append(ownership)
+        params.extend(ownership_params)
+        identity_filter, identity_params = identity_sql("ge.source_memory_id")
+        filters.append(identity_filter)
+        params.extend(identity_params)
         where_clause = f"AND {' AND '.join(filters)}" if filters else ""
 
         async with self._read_connect() as db:
@@ -283,6 +313,8 @@ class GraphStoreReadMixin:
         limit: int,
     ) -> list[int]:
         """Return graph nodes adjacent to the given nodes through active edges."""
+        if not await identity_current():
+            return []
         if not node_ids:
             return []
 
@@ -290,6 +322,14 @@ class GraphStoreReadMixin:
         placeholders = ",".join("?" * len(normalized_ids))
         limit = max(1, min(limit, 500))
 
+        ownership, ownership_params = adapter_sql("metadata")
+        identity_filter, identity_params = identity_sql("source_memory_id")
+        owner_filter = (
+            f"AND source_memory_id IN (SELECT source_memory_id FROM graph_entries WHERE {ownership} AND {identity_filter})"
+            if ownership_params or identity_params
+            else ""
+        )
+        ownership_params.extend(identity_params)
         async with self._read_connect() as db:
             cursor = await db.execute(
                 f"""
@@ -298,19 +338,26 @@ class GraphStoreReadMixin:
                     SELECT target_node_id AS neighbor_id, weight AS edge_weight
                     FROM graph_edges
                     WHERE source_node_id IN ({placeholders})
-                      AND status = 'active'
+                      AND status = 'active' {owner_filter}
                     UNION ALL
                     SELECT source_node_id AS neighbor_id, weight AS edge_weight
                     FROM graph_edges
                     WHERE target_node_id IN ({placeholders})
-                      AND status = 'active'
+                      AND status = 'active' {owner_filter}
                 )
                 WHERE neighbor_id NOT IN ({placeholders})
                 GROUP BY neighbor_id
                 ORDER BY total_weight DESC, neighbor_id ASC
                 LIMIT ?
                 """,
-                (*normalized_ids, *normalized_ids, *normalized_ids, limit),
+                (
+                    *normalized_ids,
+                    *ownership_params,
+                    *normalized_ids,
+                    *ownership_params,
+                    *normalized_ids,
+                    limit,
+                ),
             )
             rows = await cursor.fetchall()
 
@@ -318,6 +365,30 @@ class GraphStoreReadMixin:
 
     async def get_memory_entry_stats(self) -> dict[str, int]:
         """Return graph storage counts for status reporting."""
+        ownership, ownership_params = adapter_sql("ge.metadata")
+        if ownership_params:
+            async with self._read_connect() as db:
+                entries = await (
+                    await db.execute(
+                        f"SELECT COUNT(*) FROM graph_entries ge WHERE {ownership}",
+                        ownership_params,
+                    )
+                ).fetchone()
+                nodes = await (
+                    await db.execute(
+                        f"SELECT COUNT(DISTINCT gen.node_id) FROM graph_entry_nodes gen JOIN graph_entries ge ON ge.id=gen.entry_id WHERE {ownership}",
+                        ownership_params,
+                    )
+                ).fetchone()
+                edges = await (
+                    await db.execute(
+                        f"SELECT COUNT(DISTINCT ge.edge_id) FROM graph_entries ge WHERE {ownership}",
+                        ownership_params,
+                    )
+                ).fetchone()
+            return dict(
+                graph_nodes=nodes[0], graph_edges=edges[0], graph_entries=entries[0]
+            )
         async with self._read_connect() as db:
             node_cursor = await db.execute("SELECT COUNT(*) FROM graph_nodes")
             edge_cursor = await db.execute("SELECT COUNT(*) FROM graph_edges")

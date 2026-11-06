@@ -9,6 +9,7 @@ import networkx as nx
 from quart import request
 
 from astrbot.api import logger
+from ..person_query import person_memory_ids, search_person_memories
 
 if TYPE_CHECKING:
     from .utils import PageApiUtils
@@ -100,6 +101,7 @@ class GraphHandler:
         args = request.args
         session_id = self.utils.optional_text(args.get("session_id"))
         persona_id = self.utils.optional_text(args.get("persona_id"))
+        person_id = str(args.get("person_id") or "").strip() or None
         full_graph = str(args.get("full_graph", "false")).strip().lower() in {
             "1",
             "true",
@@ -139,7 +141,16 @@ class GraphHandler:
                     )
                 )
 
-            if full_graph:
+            if person_id:
+                ids = await person_memory_ids(memory_engine, person_id, session_id, persona_id)
+                if full_graph:
+                    snapshot = await graph_store.get_full_graph_snapshot(memory_ids=ids)
+                else:
+                    snapshot = await graph_store.get_subgraph_for_memories(
+                        ids[:limit_memories], limit_entries=limit_entries,
+                        limit_nodes=limit_nodes, limit_edges=limit_edges,
+                    )
+            elif full_graph:
                 snapshot = await graph_store.get_full_graph_snapshot(
                     session_id=session_id,
                     persona_id=persona_id,
@@ -196,6 +207,7 @@ class GraphHandler:
         query_text = str(payload.get("query", "")).strip()
         session_id = self.utils.optional_text(payload.get("session_id"))
         persona_id = self.utils.optional_text(payload.get("persona_id"))
+        person_id = str(payload.get("person_id") or "").strip() or None
         memory_id_raw = payload.get("memory_id")
 
         try:
@@ -208,6 +220,10 @@ class GraphHandler:
 
         try:
             graph_store = self.utils.get_graph_store(memory_engine)
+            person_ids = await person_memory_ids(
+                memory_engine, person_id, session_id, persona_id
+            ) if person_id else None
+            person_set = set(person_ids) if person_ids is not None else None
             # payload 只消费 graph 计数，无需触发全表统计扫描
             stats = await graph_store.get_memory_entry_stats() if graph_store else {}
             empty_snapshot = {
@@ -237,6 +253,8 @@ class GraphHandler:
                     memory_id = int(memory_id_raw)
                 except (TypeError, ValueError):
                     return self.utils.error("memory_id 必须是整数")
+                if person_set is not None and memory_id not in person_set:
+                    return self.utils.error("该记忆不属于当前唯一用户标识")
 
                 snapshot = await graph_store.get_subgraph_for_memories(
                     [memory_id],
@@ -261,14 +279,20 @@ class GraphHandler:
 
             # 模式 2: 无查询，返回概览
             if not query_text:
-                snapshot = await graph_store.get_graph_snapshot(
-                    session_id=session_id,
-                    persona_id=persona_id,
-                    limit_memories=limit_memories,
-                    limit_entries=limit_entries,
-                    limit_nodes=limit_nodes,
-                    limit_edges=limit_edges,
-                )
+                if person_ids is not None:
+                    snapshot = await graph_store.get_subgraph_for_memories(
+                        person_ids[:limit_memories], limit_entries=limit_entries,
+                        limit_nodes=limit_nodes, limit_edges=limit_edges,
+                    )
+                else:
+                    snapshot = await graph_store.get_graph_snapshot(
+                        session_id=session_id,
+                        persona_id=persona_id,
+                        limit_memories=limit_memories,
+                        limit_entries=limit_entries,
+                        limit_nodes=limit_nodes,
+                        limit_edges=limit_edges,
+                    )
                 await asyncio.to_thread(self._assign_communities, snapshot)
                 return self.utils.ok(
                     self.utils.build_graph_view_payload(
@@ -284,16 +308,21 @@ class GraphHandler:
                 )
 
             # 模式 3: 基于查询文本的语义检索
-            search_results = await memory_engine.search_memories(
-                query=query_text,
-                k=limit_memories,
-                session_id=session_id,
-                persona_id=persona_id,
-            )
+            if person_ids is not None:
+                search_results = await search_person_memories(
+                    memory_engine, person_ids, query_text, persona_id, limit_memories
+                )
+            else:
+                search_results = await memory_engine.search_memories(
+                    query=query_text, k=limit_memories,
+                    session_id=session_id, persona_id=persona_id,
+                )
             retrieval_items = []
             matched_memory_ids: list[int] = []
             seen_memory_ids: set[int] = set()
             for result in search_results:
+                if person_set is not None and int(result.doc_id) not in person_set:
+                    continue
                 memory_id = self._add_memory_id(
                     matched_memory_ids,
                     seen_memory_ids,
@@ -349,11 +378,14 @@ class GraphHandler:
                     persona_id=persona_id,
                 )
                 for hit in node_entry_hits:
+                    if person_set is not None and hit.get("source_memory_id") not in person_set:
+                        continue
                     memory_id = self._add_memory_id(
                         matched_memory_ids,
                         seen_memory_ids,
                         hit.get("source_memory_id"),
                     )
+
                     if memory_id is None:
                         continue
                     if not any(
@@ -379,6 +411,21 @@ class GraphHandler:
                                 "matched_node_ids": matched_node_ids,
                             }
                         )
+
+            # 人物范围内补充关键词命中，兼容暂无向量的旧记录。
+            if person_ids is not None:
+                page = await memory_engine.list_memories_page(
+                    person_id=person_id, session_id=session_id, keyword=query_text,
+                    page_size=limit_memories,
+                )
+                for row in page["items"]:
+                    if int(row["id"]) not in person_set:
+                        continue
+                    self._add_memory_id(matched_memory_ids, seen_memory_ids, row["id"])
+                    if not any(item["memory_id"] == int(row["id"]) for item in retrieval_items):
+                        retrieval_items.append({"memory_id": int(row["id"]), "content": row["text"],
+                                                "metadata": self.utils.normalize_metadata(row["metadata"]),
+                                                "final_score": 0, "source": "person_keyword"})
 
             snapshot = await graph_store.get_subgraph_for_memories(
                 matched_memory_ids[:limit_memories],

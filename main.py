@@ -1,9 +1,12 @@
+# one_id 核心门面保留旧接口，并接入真实事件的受限自动申请。
 """
 main.py - LivingMemory 插件主文件
 负责插件注册、初始化和生命周期管理
 """
 
+from .core.memory_scope import adapter_access
 import asyncio
+from .core.memory_scope import adapter_access
 import re
 from collections.abc import AsyncGenerator
 from importlib import metadata as importlib_metadata
@@ -164,11 +167,51 @@ class LivingMemoryPlugin(Star):
         engine = getattr(self.initializer, "memory_engine", None)
         if engine is None:
             return []
-        return await engine.search_memories_for_identity(
-            query, identity=identity, persona_id=persona_id or None, k=k,
-        )
+        with adapter_access(self.config_manager, event):
+            results = await engine.search_memories_for_identity(
+                query, identity=identity, persona_id=persona_id or None, k=k,
+            )
+            return await engine.validate_identity_results(results)
 
     # ---------------------------------------------------------- 绑定修正（阶段 1）
+    async def validate_identity_results(self, results: list) -> list:
+        """已接入插件在最终注入/发送前复核；旧快照不代表当前授权。"""
+        return await self.initializer.memory_engine.validate_identity_results(results)
+
+    async def project_identity(self, **kwargs) -> dict:
+        return await self.initializer.memory_engine.project_identity(**kwargs)
+
+    async def submit_identity_application(self, **kwargs) -> dict:
+        """可信 Python 调用方提交手动申请；操作者由调用方认证，不向模型暴露。"""
+        if kwargs.get("source", "manual") != "manual":
+            raise ValueError("自动申请必须使用实际事件入口")
+        return await self.initializer.identity_store.submit_application(**kwargs)
+
+    async def submit_identity_application_for_event(
+        self, event, *, platform: str, account_id: str, evidence_ref: str,
+        idempotency_key: str, evidence_type: str = "self_declaration",
+    ) -> dict:
+        from .core.identity import is_synthetic_memory_event
+        identity = await self.resolve_identity_context(event)
+        if is_synthetic_memory_event(event):
+            raise ValueError("合成事件不能生成自动申请")
+        account = identity["source_account"]
+        return await self.initializer.identity_store.submit_application(
+            one_id=identity["one_id"], platform=platform, account_id=account_id,
+            operator="event:" + account, idempotency_key=idempotency_key, source="auto",
+            source_account=account,
+            evidence={"type": evidence_type, "ref": evidence_ref, "actor_account": account},
+        )
+
+    async def review_identity_application(self, application_id: str, **kwargs) -> dict:
+        return await self.initializer.identity_store.review_application(application_id, **kwargs)
+
+    async def preview_identity_change(self, **kwargs) -> dict:
+        return await self.initializer.memory_engine.preview_identity_change(**kwargs)
+
+    async def unlink_identity_account(self, **kwargs) -> dict:
+        return await self.initializer.identity_store.unlink_account(**kwargs)
+
     async def preview_binding_change(
         self, *, source_account: str = "", person_id: str = "", sample_limit: int = 10,
     ) -> dict:
@@ -177,9 +220,7 @@ class LivingMemoryPlugin(Star):
         if store is None:
             return {"total": 0, "by_audience": {}, "memory_ids": [], "samples": []}
         return await store.preview_impact(
-            source_account=source_account,
-            person_id=person_id,
-            sample_limit=sample_limit,
+            source_account=source_account, person_id=person_id, sample_limit=sample_limit,
         )
 
     async def apply_binding_change(
@@ -224,28 +265,14 @@ class LivingMemoryPlugin(Star):
                 },
             )
         binding = await store.upsert_binding(
-            person_id=person_id,
-            platform=platform,
-            account_id=account_id,
-            display_name=display_name,
-            source=source,
-            evidence_type=evidence_type,
-            evidence_ref=evidence_ref,
-            operator=operator,
-            reviewer=reviewer,
-            note=note,
-            channel=channel,
-            reason=reason,
-            file_hash=file_hash,
+            person_id=person_id, platform=platform, account_id=account_id,
+            display_name=display_name, source=source, evidence_type=evidence_type,
+            evidence_ref=evidence_ref, operator=operator, reviewer=reviewer,
+            note=note, channel=channel, reason=reason, file_hash=file_hash,
             request_id=request_id,
             expected_binding=expected_binding,
         )
-        return {
-            "before": before,
-            "binding": binding,
-            "preview": preview,
-            "archived": archived,
-        }
+        return {"before": before, "binding": binding, "preview": preview, "archived": archived}
 
     async def rollback_binding_change(
         self,
@@ -264,8 +291,7 @@ class LivingMemoryPlugin(Star):
             raise RuntimeError("IdentityStore 未初始化")
         binding = await store.rollback_binding(
             binding_id, to_version,
-            operator=operator, reviewer=reviewer, reason=reason,
-            request_id=request_id,
+            operator=operator, reviewer=reviewer, reason=reason, request_id=request_id,
         )
         restored = 0
         engine = getattr(self.initializer, "memory_engine", None)
@@ -390,7 +416,6 @@ class LivingMemoryPlugin(Star):
             enabled, reason=reason, operator=operator, reviewer=reviewer,
             risk_ack=risk_ack, channel="page", request_id=request_id,
         )
-
     def _create_tracked_task(self, coro) -> asyncio.Task:
         """创建并跟踪后台任务"""
         task = asyncio.create_task(coro)
@@ -625,8 +650,23 @@ class LivingMemoryPlugin(Star):
             yield event.plain_result(self._command_handler_not_ready_message())
             return
         handler = getattr(self.command_handler, handler_name)
-        async for item in handler(event, *args, **kwargs):
-            yield item
+        messages = handler(event, *args, **kwargs)
+        try:
+            while True:
+                with adapter_access(
+                    self.config_manager, event, write=handler_name == "handle_summarize"
+                ):
+                    try:
+                        item = await anext(messages)
+                    except StopAsyncIteration:
+                        return
+                yield item
+        finally:
+            with adapter_access(
+                self.config_manager, event, write=handler_name == "handle_summarize"
+            ):
+                await messages.aclose()
+
 
     # ==================== 事件钩子 ====================
 

@@ -299,6 +299,7 @@
      ================================================================ */
   function getFilters() {
     return {
+      person_id: document.getElementById("graph-person-filter")?.value.trim() || null,
       session_id: dom.sessionInput ? dom.sessionInput.value.trim() || null : null,
     };
   }
@@ -325,6 +326,7 @@
       var params = new URLSearchParams();
       if (fullGraph) params.set("full_graph", "true");
       if (filters.session_id) params.set("session_id", filters.session_id);
+      if (filters.person_id) params.set("person_id", filters.person_id);
       var qs = params.toString();
       var payload = await requestGraph("/graph/overview" + (qs ? "?" + qs : ""));
       state.hasLoadedOverview = true;
@@ -362,6 +364,7 @@
     try {
       var filters = getFilters();
       var body = addExpandedLimits({ query: query });
+      addOptionalFilter(body, "person_id", filters.person_id);
       addOptionalFilter(body, "session_id", filters.session_id);
       var payload = await requestGraph("/graph/query", {
         method: "POST",
@@ -388,6 +391,7 @@
     try {
       var filters = getFilters();
       var body = addExpandedLimits({ memory_id: id });
+      addOptionalFilter(body, "person_id", filters.person_id);
       addOptionalFilter(body, "session_id", filters.session_id);
       var payload = await requestGraph("/graph/query", {
         method: "POST",

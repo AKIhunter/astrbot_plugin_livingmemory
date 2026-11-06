@@ -9,6 +9,7 @@ from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
 from astrbot.api import logger
+from ..audience_policy import audience_policy_for
 
 
 class SessionManagerConfig(BaseModel):
@@ -75,7 +76,8 @@ class RecallEngineConfig(BaseModel):
     )
     fallback_to_vector: bool = Field(default=True, description="是否启用向量检索回退")
     rerank_enabled: bool = Field(
-        default=False, description="是否启用 Rerank 重排序（需在 AstrBot 中配置 Rerank 提供商）"
+        default=False,
+        description="是否启用 Rerank 重排序（需在 AstrBot 中配置 Rerank 提供商）",
     )
     rerank_provider_id: str = Field(
         default="", description="AstrBot 中 Rerank 提供商的 ID，留空则不重排序"
@@ -146,6 +148,12 @@ class ReflectionEngineConfig(BaseModel):
 
     summary_trigger_rounds: int = Field(
         default=10, ge=1, le=100, description="触发反思的对话轮次"
+    )
+    max_messages_per_segment: int = Field(
+        default=120,
+        ge=2,
+        le=1000,
+        description="Maximum messages per reflection segment",
     )
     max_segments_per_run: int = Field(
         default=10,
@@ -230,6 +238,21 @@ class ForgettingAgentConfig(BaseModel):
     cleanup_importance_threshold: float = Field(
         default=0.3, ge=0.0, le=1.0, description="清理重要性阈值"
     )
+    long_term_retention_enabled: bool = Field(
+        default=False, description="保护独特历史，只压缩重复日常"
+    )
+    retention_recent_days: int = Field(
+        default=180, ge=1, le=36500, description="近期日常完整保留天数"
+    )
+    retention_sample_days: int = Field(
+        default=90, ge=1, le=3650, description="历史日常采样间隔"
+    )
+    retention_min_occurrences: int = Field(
+        default=3, ge=3, le=100, description="压缩所需不同日期数"
+    )
+    retention_atom_days: int = Field(
+        default=3650, ge=1, le=36500, description="长期原子保留天数"
+    )
 
 
 class FilteringConfig(BaseModel):
@@ -241,6 +264,9 @@ class FilteringConfig(BaseModel):
         default="legacy", pattern="^(legacy|session|user|global)$"
     )
     isolated_sessions: str = Field(default="", description="强制隔离的会话列表")
+    shared_adapter_ids: list[str] | None = Field(
+        default=None, description="Adapter instances sharing long-term memory"
+    )
 
 
 class AccessControlConfig(BaseModel):
@@ -249,6 +275,23 @@ class AccessControlConfig(BaseModel):
     whitelist_enabled: bool = Field(default=False, description="是否启用记忆白名单")
     allowed_ids: str = Field(default="", description="允许使用长期记忆的标识列表")
     identity_aliases: str = Field(default="", description="跨平台用户身份别名")
+
+
+class AudiencePolicyConfig(BaseModel):
+    """仅控制读取受众；敏感共享显式开启且受等级/白名单约束。"""
+
+    cross_group_recall: bool = True
+    private_to_group_recall: bool = False
+    sensitive_to_group_recall: bool = False
+    cross_group_max_sensitivity: int = Field(default=1, ge=0, le=3)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_policy(cls, values):
+        # 单个损坏开关只关闭共享，避免全局配置回退误开其他功能。
+        if not isinstance(values, dict):
+            values = {"cross_group_recall": False, "private_to_group_recall": False}
+        return audience_policy_for({"audience": values})
 
 
 class ProviderConfig(BaseModel):
@@ -429,9 +472,7 @@ class MemoryDedupConfig(BaseModel):
     max_candidates: int = Field(
         default=3, ge=1, le=20, description="每次检测比较的候选记忆数量"
     )
-    merge_sources: bool = Field(
-        default=True, description="合并时是否保留新的来源消息"
-    )
+    merge_sources: bool = Field(default=True, description="合并时是否保留新的来源消息")
     max_source_messages: int = Field(
         default=50, ge=1, le=500, description="合并后最多保留的来源消息条数"
     )
@@ -464,6 +505,7 @@ class LivingMemoryConfig(BaseModel):
         default_factory=ForgettingAgentConfig
     )
     access_control: AccessControlConfig = Field(default_factory=AccessControlConfig)
+    audience: AudiencePolicyConfig = Field(default_factory=AudiencePolicyConfig)
     filtering_settings: FilteringConfig = Field(default_factory=FilteringConfig)
     provider_settings: ProviderConfig = Field(default_factory=ProviderConfig)
     shared_embedding_cache: SharedEmbeddingCacheConfig = Field(
@@ -673,6 +715,25 @@ def normalize_config(
             config[key] = dict(config[key])
 
     for section_name, section_meta in config.items():
+        if section_name == "audience":
+            # 授权扩展开关不能沿用普通配置的字符串/数字真值强转。
+            policy = audience_policy_for({"audience": section_meta})
+            if not isinstance(section_meta, dict):
+                config[section_name] = policy
+                corrections.append({
+                    "path": section_name, "old": section_meta, "new": policy,
+                    "reason": "受众结构无效，已关闭扩展召回",
+                })
+            else:
+                config[section_name] = {**section_meta, **policy}
+                for field_name, value in policy.items():
+                    old = section_meta.get(field_name)
+                    if old != value or type(old) is not type(value):
+                        corrections.append({
+                            "path": f"audience.{field_name}", "old": old, "new": value,
+                            "reason": "受众配置必须为有效类型，坏值采用保守限制",
+                        })
+            continue
         fields_meta = section_schema.get(section_name)
         if fields_meta is None:
             continue  # 非模型节（如 bot_language）不在修正范围内
