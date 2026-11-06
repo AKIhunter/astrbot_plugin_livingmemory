@@ -27,9 +27,13 @@ def allowed(name):
     if name in TOP:
         return True
     if p.parts[0] in {"core", "storage"}:
-        return p.suffix in {".py", ".json"}
+        return p.suffix in {".py", ".json"} or (
+            p.parts[:2] == ("core", "prompts") and p.suffix == ".txt"
+        )
     if p.parts[0] == "pages":
-        return p.suffix in {".html", ".css", ".js", ".json", ".txt", ".svg"}
+        return p.suffix in {".html", ".css", ".js", ".json", ".txt", ".svg"} or (
+            p.parts[:3] == ("pages", "dashboard", "vendor") and p.name.endswith("_LICENSE")
+        )
     return name == "static/stopwords/stopwords_hit.txt"
 
 

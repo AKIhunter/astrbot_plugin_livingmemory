@@ -30,3 +30,18 @@ def test_main_checks_and_draft_release_are_required():
     assert create["with"]["draft"] is True
     assert create["with"]["target_commitish"]=="${{ github.sha }}"
     assert release["jobs"]["check-version"]["outputs"]["previous_sha"]
+
+
+def test_plugin_archive_includes_prompts_and_vendor_license_without_development_data():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("lm_release_builder", ROOT/"scripts/build_release.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    prompts = list((ROOT/"core/prompts").glob("*.txt"))
+    assert len(prompts) >= 7
+    for path in prompts:
+        assert module.allowed(path.relative_to(ROOT).as_posix()), path
+    assert module.allowed("pages/dashboard/vendor/LUCIDE_LICENSE")
+    for name in ("data/memory.db", "tests/test_engine.py", "benchmarks/dataset.json",
+                 ".env", "core/prompts/.secret.txt", "../metadata.yaml"):
+        assert not module.allowed(name), name
