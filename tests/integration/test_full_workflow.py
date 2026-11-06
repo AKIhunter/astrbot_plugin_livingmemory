@@ -5,6 +5,7 @@ Integration-style workflow tests with mocked dependencies.
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from tests.identity_fixture_support import identity_engine_fixture, summary_window_fixture
 from astrbot_plugin_livingmemory.core.base.config_manager import ConfigManager
 from astrbot_plugin_livingmemory.core.command_handler import CommandHandler
 from astrbot_plugin_livingmemory.core.event_handler import EventHandler
@@ -24,6 +25,7 @@ def setup_bundle():
 
     memory_engine = Mock()
     memory_engine.search_memories = AsyncMock(return_value=[])
+    identity_engine_fixture(memory_engine)
     memory_engine.add_memory = AsyncMock(return_value=1)
     memory_engine.get_statistics = AsyncMock(
         return_value={
@@ -72,6 +74,8 @@ def setup_bundle():
         return_value=Mock(rowcount=1)
     )
     conversation_manager.store.connection.commit = AsyncMock()
+    conversation_manager.invalidate_cache = AsyncMock()
+    summary_window_fixture(conversation_manager)
 
     event_handler = EventHandler(
         context=context,
@@ -93,7 +97,7 @@ def setup_bundle():
 
 def _make_event():
     event = Mock()
-    event.unified_msg_origin = "test:private:u1"
+    event.unified_msg_origin = "test:FriendMessage:u1"
     event.get_message_type = Mock(return_value=MessageType.FRIEND_MESSAGE)
     event.get_sender_id = Mock(return_value="u1")
     event.get_self_id = Mock(return_value="bot")
@@ -101,6 +105,8 @@ def _make_event():
     event.get_message_str = Mock(return_value="hello")
     event.get_messages = Mock(return_value=[])
     event.get_platform_name = Mock(return_value="test")
+    event.get_group_id = Mock(return_value="")
+    event.get_extra = Mock(return_value=None)
     event.plain_result = lambda x: x
     return event
 

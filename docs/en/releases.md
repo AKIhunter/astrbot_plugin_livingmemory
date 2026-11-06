@@ -1,5 +1,13 @@
 # Releases and Upgrades
 
+## 2.10.0 · November 6, 2026
+
+This maintained fork preserves the deployed 2.9.0 runtime, OneID, privacy controls and existing pages. Optional long-term retention protects unique events and facts while sampling repeated routines. It is disabled by default and does not restore deleted or expired memories.
+
+[Download 2.10.0 and the complete synthetic benchmark](https://github.com/AKIhunter/astrbot_plugin_livingmemory/releases/tag/2.10.0). Back up data, configuration and both vector indexes before upgrading.
+
+Historical results: 3,580 of 18,260 principal records retained, 84.3% strict accuracy, 89.8% semantic accuracy and 88.1% positive evidence completeness at five results. The original 90% target was missed by one question. Candidate controls and production checks are reported separately in the release evidence.
+
 ## 2.8.4 · November 1, 2026
 
 2.8.4 fixes authenticated 3D graph loading, improves SQLite open-error diagnostics and explains the host upgrade for timestamp write failures. No plugin configuration changes or database migration are required.

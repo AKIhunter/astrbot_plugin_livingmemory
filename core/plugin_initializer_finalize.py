@@ -1,3 +1,4 @@
+# 身份存储初始化后与原生引擎写事务协调。
 """
 PluginInitializer 的 InitializerFinalizeMixin 拆分模块
 自动从 core/plugin_initializer.py 拆分，保持行为不变
@@ -23,6 +24,7 @@ import time
 
 class InitializerFinalizeMixin:
     """PluginInitializer 拆分模块：InitializerFinalizeMixin"""
+
     async def _complete_initialization(self):
         """完成完整的初始化流程"""
         if self._initialization_complete:
@@ -83,7 +85,7 @@ class InitializerFinalizeMixin:
             # 初始化数据库迁移管理器
             self.db_migration = DBMigration(str(db_path))
 
-            # 阶段 1：人物绑定/审计表与记忆同库；不改 documents 既有结构。
+            # 阶段 1：人物绑定表与审计表随主库一起就绪（建表幂等，不迁移旧数据）。
             from ..storage.identity_store import IdentityStore
 
             self.identity_store = IdentityStore(str(db_path))
@@ -97,7 +99,22 @@ class InitializerFinalizeMixin:
             stopwords_dir = data_dir_path / "stopwords"
             stopwords_dir.mkdir(parents=True, exist_ok=True)
 
+            adapter_instances = {
+                item["id"]: item["type"]
+                for item in self.context.get_config().get("platform", [])
+                if item.get("id")
+            }
+            adapter_instances.update(
+                {
+                    item.meta().id: item.meta().name
+                    for item in self.context.platform_manager.get_insts()
+                }
+            )
             memory_engine_config = {
+                "graph_document_path": str(graph_doc_path)
+                if graph_memory_enabled
+                else None,
+                "adapter_instances": adapter_instances,
                 "rrf_k": self.config_manager.get("fusion_strategy.rrf_k", 60),
                 "decay_rate": self.config_manager.get(
                     "importance_decay.decay_rate", 0.01
@@ -173,6 +190,21 @@ class InitializerFinalizeMixin:
                 ),
                 "auto_archived_enabled": self.config_manager.get(
                     "forgetting_agent.auto_archived_enabled", False
+                ),
+                "long_term_retention_enabled": self.config_manager.get(
+                    "forgetting_agent.long_term_retention_enabled", False
+                ),
+                "retention_recent_days": self.config_manager.get(
+                    "forgetting_agent.retention_recent_days", 180
+                ),
+                "retention_sample_days": self.config_manager.get(
+                    "forgetting_agent.retention_sample_days", 90
+                ),
+                "retention_min_occurrences": self.config_manager.get(
+                    "forgetting_agent.retention_min_occurrences", 3
+                ),
+                "retention_atom_days": self.config_manager.get(
+                    "forgetting_agent.retention_atom_days", 3650
                 ),
                 "stopwords_path": str(stopwords_dir),
                 "graph_memory_enabled": graph_memory_enabled,
@@ -268,6 +300,9 @@ class InitializerFinalizeMixin:
                 rerank_provider_resolver=resolve_rerank_provider,
             )
             await self.memory_engine.initialize()
+            # 身份写入与原生记忆写入复用协调事务；初始化完成后才对外开放。
+            self.identity_store.coordinate_with(self.memory_engine)
+            self.memory_engine.identity_store = self.identity_store
             logger.info("MemoryEngine 已初始化")
 
             # 初始化 ConversationManager
@@ -337,9 +372,7 @@ class InitializerFinalizeMixin:
             )
             consolidation_daily = (
                 self.config_manager.get("memory_consolidation.enabled", False)
-                and self.config_manager.get(
-                    "memory_consolidation.trigger", "daily"
-                )
+                and self.config_manager.get("memory_consolidation.trigger", "daily")
                 == "daily"
             )
             if self.memory_engine and (

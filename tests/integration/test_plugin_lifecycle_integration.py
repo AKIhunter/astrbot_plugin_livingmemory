@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 import astrbot_plugin_livingmemory.main as plugin_main
 import pytest
+from quart import Quart
 
 
 class _FakeInitializer:
@@ -68,7 +69,10 @@ async def test_page_routes_are_registered_while_providers_are_pending(
             call.args[0]: call.args[1]
             for call in plugin.context.register_web_api.call_args_list
         }
-        response = await routes["/astrbot_plugin_livingmemory/page/stats"]()
+        # 已上线路由包含请求作用域包装，按真实Quart请求环境调用。
+        app = Quart(__name__)
+        async with app.test_request_context("/astrbot_plugin_livingmemory/page/stats"):
+            response = await routes["/astrbot_plugin_livingmemory/page/stats"]()
         assert response["status"] == "error"
         assert "插件" in response["message"]
     finally:

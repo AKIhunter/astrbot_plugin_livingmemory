@@ -1,6 +1,27 @@
 {
   "schema_version": 1,
   "description": "LivingMemory 默认敏感词表。首次运行时复制到数据目录的 privacy_lexicon.json，可直接编辑并热加载；也可通过 LIVINGMEMORY_PRIVACY_LEXICON 指定路径。每条规则包含分组、等级(0-3)、mask_policy 与替换泛称。",
+  "normalization": {
+    "unicode_form": "NFKC",
+    "character_map": {
+      "證": "证", "號": "号", "護": "护", "碼": "码", "賬": "账", "帳": "账",
+      "戶": "户", "銀": "银", "聯": "联", "繫": "系", "郵": "邮", "額": "额",
+      "轉": "转", "幣": "币", "塊": "块", "萬": "万", "單": "单", "棟": "栋",
+      "門": "门", "區": "区", "樓": "楼", "陰": "阴", "經": "经", "圍": "围",
+      "處": "处", "雙": "双", "戀": "恋", "櫃": "柜", "別": "别", "無": "无",
+      "鬱": "郁", "憂": "忧", "慮": "虑", "癥": "症", "礙": "碍", "藥": "药",
+      "賴": "赖", "賭": "赌", "癮": "瘾", "網": "网", "貸": "贷", "債": "债",
+      "負": "负", "務": "务", "還": "还", "訊": "讯", "錄": "录", "訴": "诉",
+      "訟": "讼", "紛": "纷", "糾": "纠", "勞": "劳", "動": "动", "親": "亲",
+      "閨": "闺", "媽": "妈", "爺": "爷"
+    }
+  },
+  "keyword_matching": {
+    "separators": " \t\r\n._-·",
+    "max_separator_run": 2,
+    "ascii_boundaries": true
+  },
+  "matching_notes": "仅匹配视图逐码点NFKC及有限字形映射，原文与未命中片段不改变；不做同音/编辑距离模糊。keyword_patterns的{{keyword}}复用登记词及边界。短ASCII凭据词须赋值语境。新增默认文件不会覆盖已有运行词表，更不会重分级或重索引旧数据。",
   "categories": [
     {
       "name": "id_document",
@@ -8,7 +29,8 @@
       "sensitivity": 3,
       "replacement": "证件信息",
       "keywords": ["身份证", "身份证号", "证件号", "护照号", "户口本", "户口簿", "社保号", "社保卡号", "学籍号", "居住证"],
-      "patterns": ["(身份证|证件)(号)?[是为：:\\s]*[\\dXx]{6,20}"]
+      "patterns": [],
+      "keyword_patterns": ["{{keyword}}[是为:=\\s]*(?:[A-Z0-9][ -]?){6,40}"]
     },
     {
       "name": "vehicle_plate",
@@ -23,11 +45,11 @@
       "policy": "account",
       "sensitivity": 3,
       "replacement": "账号密码",
-      "keywords": ["密码", "登录密码", "支付密码", "验证码", "动态码", "私钥", "密钥", "助记词", "token", "cookie", "cookies"],
+      "keywords": ["密码", "登录密码", "支付密码", "验证码", "动态码", "私钥", "密钥", "助记词", "口令", "登录码", "password"],
       "patterns": [
-        "(密码|口令|验证码|动态码|登录码)[：:是为\\s]*[A-Za-z0-9!@#$%^&*._-]{3,32}",
-        "(token|secret|cookie|cookies|api_key|apikey)\\s*[=:：]\\s*[^\\s，。；;]{3,}"
-      ]
+        "(?<![A-Za-z0-9_])(?:token|secret|cookies?|api_key|apikey)(?![A-Za-z0-9_])\\s*[=:]\\s*(?:\"[^\"\\r\\n]+\"|'[^'\\r\\n]+'|[^\\s，。；;\"'“”‘’<>]+)"
+      ],
+      "keyword_patterns": ["{{keyword}}[是为:=\\s]+(?:\"[^\"\\r\\n]+\"|'[^'\\r\\n]+'|“[^”\\r\\n]+”|[^\\s，。；;\"'“”‘’<>]+)"]
     },
     {
       "name": "bank_account",
@@ -35,7 +57,8 @@
       "sensitivity": 3,
       "replacement": "那张卡",
       "keywords": ["银行卡", "银行卡号", "信用卡", "信用卡号", "卡号", "开户行"],
-      "patterns": ["(银行卡|卡号)[：: ]*\\d{6,20}"]
+      "patterns": [],
+      "keyword_patterns": ["{{keyword}}[是为:=\\s]*(?:\\d[ -]?){6,30}"]
     },
     {
       "name": "account_identifier",
@@ -43,7 +66,8 @@
       "sensitivity": 2,
       "replacement": "那个账号",
       "keywords": ["微信号", "QQ号", "微博号", "抖音号", "快手号", "小红书号", "账号ID", "UID"],
-      "patterns": ["(QQ|微信)(号)?[：: ]*[\\w-]{5,20}", "\\bUID[：: ]*\\d{4,}"]
+      "patterns": ["(?<![A-Za-z0-9_])(?:QQ|微信)[是为:=\\s]+[A-Za-z0-9_-]{5,}"],
+      "keyword_patterns": ["{{keyword}}[是为:=\\s]+[A-Za-z0-9_-]+"]
     },
     {
       "name": "address",
@@ -51,7 +75,8 @@
       "sensitivity": 2,
       "replacement": "家附近",
       "keywords": ["住址", "家庭住址", "门牌号", "小区", "单元楼", "出租屋", "宿舍楼"],
-      "patterns": ["[\\u4e00-\\u9fa5]{1,2}[省市]?[\\u4e00-\\u9fa5]{2,8}(小区|花园|公寓)"]
+      "patterns": ["[\\u4e00-\\u9fa5]{1,2}[省市]?[\\u4e00-\\u9fa5]{2,8}(小区|花园|公寓)(?:[A-Za-z0-9一二三四五六七八九十号栋单元室 -]+)?"],
+      "keyword_patterns": ["{{keyword}}[是为:=\\s]+[^\\r\\n，。；;\"“”]+"]
     },
     {
       "name": "contact",
@@ -59,7 +84,7 @@
       "sensitivity": 2,
       "replacement": "联系方式",
       "keywords": ["手机号", "手机号码", "电话号码", "联系电话", "邮箱", "电子邮箱"],
-      "patterns": ["1[3-9]\\d{9}", "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"]
+      "patterns": ["(?<!\\d)1[3-9]\\d[ -]?\\d{4}[ -]?\\d{4}(?!\\d)", "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"]
     },
     {
       "name": "amount",
@@ -67,14 +92,18 @@
       "sensitivity": 2,
       "replacement": "不少钱",
       "keywords": ["金额", "转账", "红包", "账单"],
-      "patterns": ["\\d{3,}[\\d,]*\\s*元", "\\d+(\\.\\d+)?\\s*万", "[一二三四五六七八九十百千万两]{2,}(万|千|百)?(块|元)"]
+      "patterns": [
+        "(?<![A-Za-z0-9_.])\\d[\\d,]*(?:\\.\\d+)?\\s*(?:万[元块]?|[wk]元|元|块|CNY|RMB)(?![A-Za-z])",
+        "[¥￥]\\s*\\d[\\d,]*(?:\\.\\d+)?",
+        "[一二三四五六七八九十百千万两]{2,}(万|千|百)?(块|元)"
+      ]
     },
     {
       "name": "finance_debt",
       "policy": "finance",
       "sensitivity": 3,
-      "replacement": "一笔债务",
-      "keywords": ["欠债", "欠款", "网贷", "贷款", "负债", "债务", "高利贷", "催收", "借钱不还", "花呗欠款", "信用卡欠款", "房贷", "车贷"],
+      "replacement": "财务私事",
+      "keywords": ["欠债", "欠款", "网贷", "贷款", "负债", "债务", "高利贷", "催收", "借钱不还", "花呗欠款", "信用卡欠款", "房贷", "车贷", "逾期", "逾其", "崔收", "cuishou", "debt collection", "爆通讯录", "上门催债", "以贷养贷", "撸贷"],
       "patterns": []
     },
     {
@@ -90,7 +119,7 @@
       "policy": "health",
       "sensitivity": 3,
       "replacement": "身体情况",
-      "keywords": ["病史", "病历", "诊断", "病情", "肿瘤", "癌症", "化疗", "放疗", "手术", "住院", "流产", "抑郁", "焦虑", "抑郁症", "焦虑症", "双相", "精神科", "自杀", "自残", "艾滋", "HIV", "传染病", "体检报告", "处方"],
+      "keywords": ["病史", "病历", "诊断", "病情", "肿瘤", "癌症", "化疗", "放疗", "手术", "住院", "流产", "抑郁", "焦虑", "抑郁症", "焦虑症", "双相", "精神科", "自杀", "自残", "艾滋", "HIV", "传染病", "体检报告", "处方", "抑玉症", "玉玉症", "yiyuzheng", "ADHD", "PTSD", "强迫症", "精神分裂症", "bipolar disorder", "躁郁症", "惊恐障碍", "抑郁障碍", "解离障碍", "进食障碍"],
       "patterns": []
     },
     {
@@ -114,7 +143,40 @@
       "policy": "love",
       "sensitivity": 3,
       "replacement": "个人取向",
-      "keywords": ["性取向", "同性恋", "异性恋", "双性恋", "跨性别", "出柜", "变性"],
+      "keywords": ["性取向", "同性恋", "异性恋", "双性恋", "跨性别", "出柜", "变性", "无性恋", "泛性恋", "同杏恋", "双杏恋", "tongxinglian", "bisexual", "gay", "lesbian", "asexual", "pansexual", "transgender"],
+      "patterns": []
+    },
+    {
+      "name": "sexual_privacy",
+      "policy": "intimacy",
+      "sensitivity": 3,
+      "replacement": "亲密隐私",
+      "keywords": ["性生活", "性癖", "性僻好", "杏癖", "xingpi", "kink", "fetish", "BDSM", "性偏好", "性偏向", "恋足", "性经历", "性伴侣", "性功能", "性冷淡"],
+      "patterns": []
+    },
+    {
+      "name": "body_privacy",
+      "policy": "body",
+      "sensitivity": 3,
+      "replacement": "身体隐私",
+      "keywords": ["月经", "月精", "大姨妈", "yuejing", "menstrual cycle", "阴部", "私处", "胸围", "腰围", "乳房", "勃起障碍", "生殖器", "经期", "排卵", "精液", "阴茎", "阴道"],
+      "patterns": [],
+      "keyword_patterns": ["{{keyword}}[是为:=\\s]*\\d+(?:\\.\\d+)?\\s*(?:cm|厘米|公分)(?![A-Za-z])"]
+    },
+    {
+      "name": "addiction",
+      "policy": "addiction",
+      "sensitivity": 3,
+      "replacement": "成瘾相关私事",
+      "keywords": ["酒精依赖", "赌瘾", "赌隐", "酒瘾", "duyin", "alcohol addiction", "药物依赖", "毒瘾", "戒毒", "赌博成瘾", "药物成瘾", "吸毒", "滥用药物", "尼古丁依赖"],
+      "patterns": []
+    },
+    {
+      "name": "legal_dispute",
+      "policy": "legal",
+      "sensitivity": 3,
+      "replacement": "法律私事",
+      "keywords": ["被起诉", "诉讼", "诉颂", "传票", "打官司", "da guansi", "lawsuit", "法律纠纷", "案底", "法院传票", "劳动仲裁", "刑事拘留", "取保候审", "强制执行", "被执行人", "民事纠纷"],
       "patterns": []
     },
     {
@@ -138,8 +200,11 @@
       "policy": "family",
       "sensitivity": 2,
       "replacement": "家里人",
-      "keywords": [],
-      "patterns": ["([\\u4e00-\\u9fa5]{1,2})的(爸爸|妈妈|老公|老婆|儿子|女儿|父亲|母亲|哥哥|姐姐|弟弟|妹妹)"]
+      "keywords": ["my dad", "my mum", "my mom", "my father", "my mother"],
+      "patterns": [
+        "([\\u4e00-\\u9fa5]{1,2})的(爸爸|妈妈|老公|老婆|儿子|女儿|父亲|母亲|哥哥|姐姐|弟弟|妹妹)",
+        "(?:我家|咱家|家里的|咱)[ \\t\\r\\n._·-]{0,2}(?:老[ \\t\\r\\n._·-]{0,2}[爹娘爸妈]|娘亲|麻麻|粑粑|闺女|崽崽|二老|laodie)"
+      ]
     },
     {
       "name": "family_conflict",

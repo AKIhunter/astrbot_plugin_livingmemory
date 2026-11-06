@@ -10,4 +10,5 @@ export { SystemPage } from "./system-page.js";
 export { PromptPage } from "./prompt-page.js";
 export { SettingsPage } from "./settings-page.js";
 export { KnowledgePage } from "./knowledge-page.js";
+export { BindingPage } from "./binding-page.js";
 export * from "./utils.js";

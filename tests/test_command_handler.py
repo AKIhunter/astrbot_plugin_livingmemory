@@ -21,6 +21,7 @@ def config_manager():
 def memory_engine():
     engine = Mock()
     engine.identity_store = None
+    engine.validate_identity_results = AsyncMock(side_effect=lambda rows: rows)
     engine.search_memories = AsyncMock(side_effect=AssertionError("unscoped search"))
     engine.db_path = "/tmp/livingmemory-test.db"
     engine.get_statistics = AsyncMock(

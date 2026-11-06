@@ -1,3 +1,4 @@
+# 检索缓存包含当前 one_id 允许集与身份修订号。
 """
 MemoryEngine 的 MemoryEngineWriteOpsMixin 拆分模块
 自动从 core/managers/memory_engine.py 拆分，保持行为不变
@@ -5,14 +6,15 @@ MemoryEngine 的 MemoryEngineWriteOpsMixin 拆分模块
 
 import asyncio
 import copy
-import json
 import time
 from typing import Any
 
 from astrbot.api import logger
 
+from ..memory_scope import adapter_cache_key, adapter_sql
+from ..identity_access import identity_cache_key, identity_sql
+
 from ...storage.atom_store import AtomStore
-from ..models.memory_atom import AtomStatus, AtomType, DecayType, MemoryAtom
 from ..retrieval.hybrid_retriever import HybridResult
 from ..utils.json_utils import safe_json_dict
 from ..utils.number_utils import clamp_float
@@ -55,6 +57,8 @@ class MemoryEngineWriteOpsMixin:
     ) -> tuple[Any, ...]:
         return (
             self._search_cache_generation,
+            adapter_cache_key(),
+            identity_cache_key(),
             self._normalize_cache_query(query),
             int(k),
             session_id or "",
@@ -144,6 +148,12 @@ class MemoryEngineWriteOpsMixin:
         if persona_id is not None:
             conditions.append("json_extract(metadata, '$.persona_id') = ?")
             params.append(persona_id)
+        ownership, ownership_params = adapter_sql("metadata")
+        conditions.append(ownership)
+        params.extend(ownership_params)
+        identity_filter, identity_params = identity_sql("id")
+        conditions.append(identity_filter)
+        params.extend(identity_params)
         max_age_hours = max(0, int(self.config.get("recent_memory_max_age_hours", 72)))
         if max_age_hours > 0:
             # 表达式与 idx_doc_create_time 逐字匹配，可走索引范围扫描

@@ -19,6 +19,9 @@
           <span class="brand-name"><strong>Living</strong><strong>Memory</strong></span>
         </div>
         <nav class="sidebar-nav">
+          <button class="nav-item" data-page="bindings" aria-label="用户管理">
+            <i data-lucide="network" aria-hidden="true"></i><span>用户管理</span>
+          </button>
           <button class="nav-item active" data-page="graph" data-i18n-aria="nav.graph">
             <i data-lucide="network" aria-hidden="true"></i>
             <span data-i18n="nav.graph">Knowledge Graph</span>
@@ -112,6 +115,10 @@
         </section>
 
         <!-- Page: Graph -->
+        <section class="page" id="page-bindings">
+          <header class="page-header"><div class="page-heading"><span class="page-index">08</span><span class="page-title">用户管理</span></div></header>
+          <div class="page-body binding-page oneid-page" id="bindings-container"></div>
+        </section>
         <section class="page active" id="page-graph">
           <header class="page-header">
             <div class="page-heading"><span class="page-index">01</span><span class="page-title" data-i18n="nav.graph">Knowledge Graph</span></div>
@@ -123,6 +130,7 @@
               <button class="btn btn-secondary btn-sm" id="graph-reset-view" data-i18n="graph.resetView">Reset view</button>
               <input type="text" id="graph-session-filter" list="graph-session-options" data-i18n-aria="graph.sessionPh" class="input input-sm" data-i18n-placeholder="graph.sessionPh" placeholder="Session ID" style="width:180px" />
               <datalist id="graph-session-options"></datalist>
+              <input type="text" id="graph-person-filter" aria-label="唯一用户标识" class="input input-sm" placeholder="唯一用户标识 person_id" style="width:200px" />
               <button class="btn btn-secondary btn-sm" id="graph-overview-btn" data-i18n-aria="graph.overviewBtn">
                 <i data-lucide="layout-dashboard" aria-hidden="true"></i>
                 <span data-i18n="graph.overviewBtn">Overview</span>
@@ -170,6 +178,11 @@
             <form class="filter-bar" id="memory-filters">
               <input type="text" id="mem-keyword" data-i18n-aria="filter.keyword" class="input" data-i18n-placeholder="filter.keyword" placeholder="Search by keyword or memory ID..." />
               <input type="text" id="mem-session" data-i18n-aria="filter.sessionId" class="input" data-i18n-placeholder="filter.sessionId" placeholder="Session ID" style="max-width:200px" />
+              <input type="text" id="mem-person" aria-label="唯一用户标识" class="input" placeholder="唯一用户标识 person_id" style="max-width:200px" />
+              <select id="mem-sensitivity" aria-label="敏感等级" class="select input">
+                <option value="all">全部敏感等级</option><option value="0">0 · 公开</option>
+                <option value="1">1 · 场合</option><option value="2">2 · 敏感</option><option value="3">3 · 极敏感</option>
+              </select>
               <select id="mem-status" data-i18n-aria="flow.status" class="select input">
                 <option value="all" data-i18n="filter.statusAll">All Status</option>
                 <option value="active" data-i18n="filter.statusActive">Active</option>

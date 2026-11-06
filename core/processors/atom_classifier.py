@@ -37,6 +37,10 @@ _PREFERENCE_PATTERNS = re.compile(
     r"爱吃|爱喝|喜欢喝|喜欢去|讨厌吃|讨厌去"
 )
 
+_PAST_OR_RECURRING = re.compile(r"昨天|前天|上周|去年|前年|每周|每月|每天|每年")
+_FUTURE_INTENT = re.compile(r"明天|后天|下周|下下周|下个?月|明年|后年|打算|准备|将要")
+_DATED_RECORD = re.compile(r"^\s*(\d{4})年(\d{1,2})月(\d{1,2})[日号]\s*[，,：:]")
+
 _PERSON_PATTERNS = re.compile(
     r"(?:我|[你您]|[他她它]们?|[A-Z]\w*|[张李王刘陈杨赵黄周吴徐孙胡朱高何]"
     r"[a-zA-Z一-鿿]{1,3})"
@@ -194,7 +198,16 @@ def _classify_single(text: str) -> tuple[AtomType, float, float | None]:
     event_time = _parse_event_time(text) if has_time else None
 
     # PLANNED: time indicator + action verb → future event
-    if has_time and has_action:
+    # 过去经历和固定周期活动不属于一次性待办；未来绝对日期仍属计划。
+    dated = _DATED_RECORD.match(text)
+    historical = bool(_PAST_OR_RECURRING.search(text))
+    if dated:
+        try:
+            record_date = datetime(*(int(part) for part in dated.groups())).date()
+            historical |= record_date <= datetime.fromtimestamp(time.time()).date()
+        except ValueError:
+            pass
+    if has_time and has_action and (not historical or _FUTURE_INTENT.search(text)):
         return AtomType.PLANNED, 0.85, event_time
 
     # PREFERENCE: preference keywords dominate

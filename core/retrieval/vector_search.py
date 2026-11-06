@@ -1,3 +1,4 @@
+# one_id 允许集使用宿主 FAISS IDSelector 在检索前限制。
 """Shared query embeddings and bounded, scope-aware vector candidate expansion."""
 
 import asyncio
@@ -6,8 +7,58 @@ from contextvars import ContextVar
 from types import SimpleNamespace
 
 from ..faiss_async_persist import get_async_persister
+from ..memory_scope import adapter_sql, adapter_visible, current_adapter_access
+from ..identity_access import current_identity_access, identity_sql, identity_visible
+from .request_timing import measure
 
 query_embeddings = ContextVar("livingmemory_query_embeddings", default=None)
+
+
+async def retrieve_documents(
+    db, metadata_filters, ids=None, limit=100, offset=0, *, ids_only=False, source_key="id"
+):
+    """Apply request ownership in SQL before limiting host document reads."""
+    access = current_identity_access.get()
+    if access is not None and not await access.current():
+        return []
+    predicate, adapters = adapter_sql("metadata")
+    if not adapters and access is None:
+        return await db.document_storage.get_documents(
+            metadata_filters=metadata_filters, ids=ids, limit=limit, offset=offset
+        )
+    from sqlalchemy import text
+
+    values = {f"adapter_{i}": value for i, value in enumerate(adapters)}
+    for i in range(len(adapters)):
+        predicate = predicate.replace("?", f":adapter_{i}", 1)
+    identity_column = (
+        "json_extract(metadata,'$.source_memory_id')"
+        if source_key == "source_memory_id" else "id"
+    )
+    identity_filter, identity_params = identity_sql(identity_column)
+    conditions = [predicate, identity_filter.replace("?", ":identity_ids")]
+    if identity_params:
+        values["identity_ids"] = identity_params[0]
+    for key, value in metadata_filters.items():
+        conditions.append(f"json_extract(metadata, '$.{key}') = :filter_{key}")
+        values[f"filter_{key}"] = value
+    if ids is not None:
+        if not ids:
+            return []
+        conditions.append(
+            "id IN (" + ",".join(f":id_{i}" for i in range(len(ids))) + ")"
+        )
+        values.update({f"id_{i}": value for i, value in enumerate(ids)})
+    columns = "id" if ids_only else "id, doc_id, text, metadata"
+    sql = f"SELECT {columns} FROM documents WHERE " + " AND ".join(conditions)
+    if limit is not None:
+        sql += " LIMIT :limit OFFSET :offset"
+        values.update(limit=limit, offset=offset or 0)
+    async with db.document_storage.get_session() as session:
+        rows = (await session.execute(text(sql), values)).mappings().all()
+    if ids_only:
+        return [dict(row) for row in rows]
+    return [dict(row, metadata=json.loads(row["metadata"] or "{}")) for row in rows]
 
 
 async def retrieve_vectors(db, query, k, filters, *, source_key="id"):
@@ -34,18 +85,43 @@ async def retrieve_vectors(db, query, k, filters, *, source_key="id"):
         return []
     fetch_k = min(cap, max(k * (4 if filters else 2), k))
 
+    search_options = {}
+    identity = current_identity_access.get()
+    if identity is not None and not await identity.current():
+        return []
+    if identity is not None and not native:
+        # 不支持候选前 IDSelector 的旧宿主不能声称支持身份扩展。
+        return []
     if native:
         import numpy as np
 
+        access = current_adapter_access.get()
+        if (access is not None and access.adapter_ids is not None) or identity is not None:
+            import faiss
+
+            with measure("memory_read"):
+                candidates = await retrieve_documents(
+                    db, filters, limit=None, ids_only=True, source_key=source_key
+                )
+            if not candidates:
+                return []
+            allowed_ids = np.asarray([row["id"] for row in candidates], dtype=np.int64)
+            search_options["params"] = faiss.SearchParameters(
+                sel=faiss.IDSelectorBatch(allowed_ids)
+            )
+            cap = min(len(candidates), cap)
+            fetch_k = min(fetch_k, cap)
+
         provider = db.embedding_provider
         cache = query_embeddings.get()
-        if cache is None:
-            embedding = await provider.get_embedding(query)
-        else:
-            key = (id(provider), query)
-            if key not in cache:
-                cache[key] = asyncio.create_task(provider.get_embedding(query))
-            embedding = await asyncio.shield(cache[key])
+        with measure("embedding"):
+            if cache is None:
+                embedding = await provider.get_embedding(query)
+            else:
+                key = (id(provider), query)
+                if key not in cache:
+                    cache[key] = asyncio.create_task(provider.get_embedding(query))
+                embedding = await asyncio.shield(cache[key])
         vector = np.asarray(embedding, dtype=np.float32).ravel()
         if vector.size != storage.dimension or not np.isfinite(vector).all():
             raise ValueError("Invalid query embedding")
@@ -57,18 +133,27 @@ async def retrieve_vectors(db, query, k, filters, *, source_key="id"):
     while True:
         if native:
             persister = get_async_persister(storage)
-            if persister is not None:
-                scores, indices = await persister.search(vector, fetch_k)
-            else:
-                scores, indices = await storage.search(vector, fetch_k)
+            with measure("vector_index"):
+                if persister is not None:
+                    scores, indices = await persister.search(vector, fetch_k, **search_options)
+                elif search_options:
+                    # 宿主 EmbeddingStorage.search 不接收 params，直接限制原生索引。
+                    scores, indices = storage.index.search(
+                        vector.reshape(1, -1), fetch_k, **search_options
+                    )
+                else:
+                    scores, indices = await storage.search(vector, fetch_k)
             ids = [int(value) for value in indices[0] if value >= 0]
             new_ids = [doc_id for doc_id in ids if doc_id not in documents_by_id]
             if new_ids:
-                documents = await db.document_storage.get_documents(
-                    metadata_filters=filters,
-                    ids=new_ids,
-                    limit=len(new_ids),
-                )
+                with measure("memory_read"):
+                    documents = await retrieve_documents(
+                        db,
+                        metadata_filters=filters,
+                        ids=new_ids,
+                        limit=len(new_ids),
+                        source_key=source_key,
+                    )
                 documents_by_id.update(
                     {int(document["id"]): document for document in documents}
                 )
@@ -83,13 +168,14 @@ async def retrieve_vectors(db, query, k, filters, *, source_key="id"):
             exhausted = len(ids) < fetch_k
         else:
             # Older host adapters expose only retrieve; preserve their public API.
-            raw = await db.retrieve(
-                query=query,
-                k=fetch_k,
-                fetch_k=fetch_k,
-                rerank=False,
-                metadata_filters=filters or None,
-            )
+            with measure("vector_adapter"):
+                raw = await db.retrieve(
+                    query=query,
+                    k=fetch_k,
+                    fetch_k=fetch_k,
+                    rerank=False,
+                    metadata_filters=filters or None,
+                )
             exhausted = not filters and len(raw) < fetch_k
 
         results = []
@@ -105,12 +191,16 @@ async def retrieve_vectors(db, query, k, filters, *, source_key="id"):
                 continue
             if str(metadata.get("status") or "active") != "active":
                 continue
+            if not adapter_visible(metadata):
+                continue
             if any(metadata.get(key) != value for key, value in filters.items()):
                 continue
             identity = (
                 hit.data.get("id") if source_key == "id" else metadata.get(source_key)
             )
             if identity is None or identity in seen:
+                continue
+            if not identity_visible(identity):
                 continue
             seen.add(identity)
             results.append(hit)

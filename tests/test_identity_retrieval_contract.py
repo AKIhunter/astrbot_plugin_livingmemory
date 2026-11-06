@@ -113,13 +113,19 @@ async def retrieval_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(utils, "get_persona_id", AsyncMock(return_value=PERSONA))
     monkeypatch.setattr(memory_search_tool, "get_persona_id", AsyncMock(return_value=PERSONA))
     db = _FakeFaissDB()
+    from astrbot.core.db.vec_db.faiss_impl.document_storage import DocumentStorage
+    native_storage = DocumentStorage(str(tmp_path / "memory.db"))
+    await native_storage.initialize()
+    db.document_storage = native_storage
     engine = MemoryEngine(
         str(tmp_path / "memory.db"), db, graph_vector_db=_FakeFaissDB(),
         config={"graph_memory_enabled": True, "atom_enabled": True},
     )
     await engine.initialize()
-    store = IdentityStore(str(tmp_path / "identity.db"))
+    # 原生投影事务查询共享记忆库，不能使用另一个不含记忆表的数据库。
+    store = IdentityStore(engine.db_path)
     await store.initialize()
+    store.coordinate_with(engine)
     engine.identity_store = store
     fixtures = [
         ("aiocqhttp:actor", "qq:FriendMessage:actor", 0, PERSONA),
@@ -137,6 +143,11 @@ async def retrieval_runtime(tmp_path, monkeypatch):
             "persona_id": persona, "sensitivity": level, "audience": "public",
             "status": "active", "importance": 0.8, "has_source": True,
         })
+        # 投影直接读原生SQLite；排名边界fake不能省略其持久文档行。
+        actual_id = await native_storage.insert_document(
+            f"fixture-{doc_id}", db.docs[doc_id]["text"], db.docs[doc_id]["metadata"],
+        )
+        assert actual_id == doc_id
         await engine.save_memory_source(doc_id, [{"role": "user", "content": "synthetic detail"}])
 
     async def candidates(query, k, session_id, persona_id):
@@ -154,6 +165,7 @@ async def retrieval_runtime(tmp_path, monkeypatch):
     finally:
         engine._migrate_session_data_if_needed.assert_not_awaited()
         await engine.close()
+        await native_storage.engine.dispose()
 
 
 async def activate_pair(store):
@@ -230,9 +242,19 @@ async def test_current_metadata_and_atom_parent_override_cached_candidates(retri
             expires_at=time.time() + 3600,
         ))
         engine.faiss_db.docs[doc_id]["metadata"]["atom_types"] = ["unknown"]
+        await engine.db_connection.execute(
+            "UPDATE documents SET metadata=? WHERE id=?",
+            (json.dumps(engine.faiss_db.docs[doc_id]["metadata"]), doc_id),
+        )
+        await engine.db_connection.commit()
     for _ in range(2):
         rows = await engine.search_memories_for_identity("synthetic", identity=identity, persona_id=PERSONA)
         assert {row.doc_id for row in rows} == {3}
         assert rows[0].content == "synthetic atom 3"
     engine.faiss_db.docs[3]["metadata"]["sensitivity"] = 3
+    await engine.db_connection.execute(
+        "UPDATE documents SET metadata=? WHERE id=?",
+        (json.dumps(engine.faiss_db.docs[3]["metadata"]), 3),
+    )
+    await engine.db_connection.commit()
     assert await engine.search_memories_for_identity("synthetic", identity=identity, persona_id=PERSONA) == []

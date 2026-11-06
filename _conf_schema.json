@@ -11,6 +11,33 @@
         ],
         "default": "zh"
     },
+    "audience": {
+        "invisible": true,
+        "description": "记忆受众与跨群召回",
+        "hint": "同一身份可读范围内共享低敏感记忆；不改变历史正文或标签，显式隔离限制优先。",
+        "type": "object",
+        "items": {
+            "cross_group_recall": {
+                "type": "bool",
+                "description": "允许记忆跨群召回",
+                "hint": "默认开启。低敏记忆按上限共享；2/3级还必须开启「允许敏感记忆进入群聊」。人物归属、人格和显式隔离限制始终优先。",
+                "default": true
+            },
+            "sensitive_to_group_recall": {
+                "type": "bool",
+                "description": "允许敏感记忆进入群聊",
+                "hint": "重要：默认关闭。开启后，私聊记忆及2/3级敏感记忆可在共享等级上限内进入群聊。白名单启用时来源与目的场景均需命中白名单；仅绑定账号不会扩大白名单。显式私密/隔离限制仍然优先。",
+                "default": false
+            },
+            "cross_group_max_sensitivity": {
+                "type": "int",
+                "description": "共享敏感等级上限",
+                "hint": "重要：0=公开、1=场合、2=敏感、3=极敏感；默认1，最高3。设为2/3并开启敏感开关可能将隐私带入群聊。开关关闭时，设置高上限也不授权2/3级扩展共享。",
+                "default": 1,
+                "slider": {"min": 0, "max": 3, "step": 1}
+            }
+        }
+    },
     "unified_context": {
         "invisible": true,
         "description": "资料库与记忆统一检索",
@@ -562,6 +589,12 @@
                 "hint": "每行填写一个完整会话 ID。这些会话始终使用独立记忆作用域，不受 user、global 或旧版关闭会话过滤设置影响。",
                 "type": "text",
                 "default": ""
+            },
+            "shared_adapter_ids": {
+                "description": "互通的适配器",
+                "hint": "",
+                "type": "list",
+                "default": null
             }
         }
     },
@@ -625,6 +658,16 @@
                     "min": 0.0,
                     "max": 1.0,
                     "step": 0.01
+                }
+            },
+            "max_messages_per_segment": {
+                "description": "单段总结消息上限",
+                "type": "int",
+                "default": 120,
+                "slider": {
+                    "min": 2,
+                    "max": 1000,
+                    "step": 1
                 }
             }
         }
@@ -1021,6 +1064,40 @@
         "hint": "定期清理时间久远且重要性低的旧记忆，控制记忆库规模",
         "type": "object",
         "items": {
+            "long_term_retention_enabled": {
+                "description": "长期记忆保留",
+                "hint": "默认关闭。保留独特历史和个人事实，只压缩至少跨3天重复的相同日常；已删除和已失效记忆不会恢复。",
+                "type": "bool",
+                "default": false
+            },
+            "retention_recent_days": {
+                "description": "近期日常完整保留天数",
+                "hint": "最近180天的重复日常全部保留。",
+                "type": "int",
+                "default": 180,
+                "slider": {"min": 1, "max": 36500, "step": 1}
+            },
+            "retention_sample_days": {
+                "description": "历史日常采样间隔（天）",
+                "hint": "每90天至少留一条，另保留第一次和最新一次。",
+                "type": "int",
+                "default": 90,
+                "slider": {"min": 1, "max": 3650, "step": 1}
+            },
+            "retention_min_occurrences": {
+                "description": "日常压缩的最少重复日期数",
+                "hint": "至少3个不同日期的相同正文；不泛化数量、名字和正文内日期。",
+                "type": "int",
+                "default": 3,
+                "slider": {"min": 3, "max": 100, "step": 1}
+            },
+            "retention_atom_days": {
+                "description": "长期原子保留天数",
+                "hint": "事实、关系、偏好与已发生事件默认至少3650天；计划、未知和失效原子遵守原规则。",
+                "type": "int",
+                "default": 3650,
+                "slider": {"min": 1, "max": 36500, "step": 1}
+            },
             "auto_cleanup_enabled": {
                 "description": "启用每日自动清理",
                 "hint": "每日重要性衰减后自动清理符合条件的旧记忆。",
@@ -1061,7 +1138,6 @@
         "invisible": true,
         "description": "写入时近重复合并",
         "type": "object",
-        "invisible": true,
         "items": {
             "enabled": {
                 "description": "启用近重复检测",

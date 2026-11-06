@@ -24,7 +24,13 @@ class _WritableConfig(dict):
 
 
 def _handler(config_manager: ConfigManager) -> SettingsHandler:
-    plugin = SimpleNamespace(config_manager=config_manager)
+    plugin = SimpleNamespace(
+        config_manager=config_manager,
+        context=SimpleNamespace(
+            get_config=lambda: {"platform": []},
+            platform_manager=SimpleNamespace(get_insts=lambda: []),
+        ),
+    )
     return SettingsHandler(PageApiUtils(), plugin)
 
 
@@ -116,7 +122,12 @@ async def test_settings_routes_read_and_update_config() -> None:
     for section in sections:
         for field in section["fields"]:
             assert field["label"]
-            assert field["path"].startswith(section["key"] + ".")
+            # 已上线页面将 audience 字段集中展示于隔离卡片，保存仍使用原点路径。
+            assert field["path"] in handler._allowed_paths()
+            assert field["path"].startswith(section["key"] + ".") or (
+                section["key"] == "filtering_settings"
+                and field["path"].startswith("audience.")
+            )
 
     response = await client.post(
         "/config/update", json={"values": {"recall_engine.top_k": 7}}

@@ -38,6 +38,10 @@ export class MemoryPage {
 
     if (this.state.memory.session) params.session_id = this.state.memory.session;
     if (this.state.memory.keyword) params.keyword = this.state.memory.keyword;
+    if (this.state.memory.person) params.person_id = this.state.memory.person;
+    if (["0", "1", "2", "3"].includes(this.state.memory.sensitivity)) {
+      params.sensitivity = this.state.memory.sensitivity;
+    }
     if (this.state.memory.status && this.state.memory.status !== "all") {
       params.status = this.state.memory.status;
     }
@@ -547,10 +551,11 @@ export class MemoryPage {
   applyFilters({ reset = false, defer = false } = {}) {
     clearTimeout(this._filterTimer);
     this._fetchGeneration++;
-    const fields = { keyword: "mem-keyword", session: "mem-session", status: "mem-status", type: "mem-type", sort: "mem-sort" };
-    const defaults = { keyword: "", session: "", status: "all", type: "all", sort: "created_desc" };
+    const fields = { keyword: "mem-keyword", session: "mem-session", status: "mem-status", type: "mem-type", sort: "mem-sort", sensitivity: "mem-sensitivity", person: "mem-person" };
+    const defaults = { keyword: "", session: "", status: "all", type: "all", sort: "created_desc", sensitivity: "all", person: "" };
     for (const [key, id] of Object.entries(fields)) {
       const input = document.getElementById(id);
+      if (!input) continue;
       if (reset) input.value = defaults[key];
       this.state.memory[key] = input.value.trim();
     }

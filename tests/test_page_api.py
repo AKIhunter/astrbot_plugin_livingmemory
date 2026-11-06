@@ -1241,7 +1241,8 @@ class TestRouteRegistration:
         plugin = FakePlugin()
         api = PluginPageApi(plugin)
         api.register_routes()
-        assert len(plugin._api_routes) == 27
+        # 27条原生管理路由，加已上线的23条身份/绑定路由。
+        assert len(plugin._api_routes) == 50
 
         paths = {route for route, _, _, _ in plugin._api_routes}
         prefix = PAGE_API_PREFIX

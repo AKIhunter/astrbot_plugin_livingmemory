@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import threading
+import unicodedata
 from copy import copy
 from dataclasses import dataclass
 from typing import Any
@@ -58,11 +59,21 @@ class _Rule:
 
 
 @dataclass(frozen=True)
+class _MatchSettings:
+    unicode_form: str
+    character_map: dict[str, str]
+    separators: str
+    max_separator_run: int
+    ascii_boundaries: bool
+
+
+@dataclass(frozen=True)
 class _Lexicon:
     rules: tuple[_Rule, ...]
     ignore_patterns: tuple[re.Pattern[str], ...]
     sources: tuple[str, ...]
     fingerprint: tuple[Any, ...]
+    matching: _MatchSettings
 
 
 @dataclass
@@ -215,11 +226,56 @@ def _stat_fingerprint(path: str) -> tuple[str, int, int]:
         return (os.path.abspath(path), -1, -1)
 
 
-def _compile_keyword(keyword: Any) -> re.Pattern[str] | None:
+def _match_settings(base: dict[str, Any]) -> _MatchSettings:
+    normalization = base.get("normalization") or {}
+    matching = base.get("keyword_matching") or {}
+    if not isinstance(normalization, dict):
+        normalization = {}
+    if not isinstance(matching, dict):
+        matching = {}
+    form = normalization.get("unicode_form")
+    mapping = normalization.get("character_map") or {}
+    if not isinstance(mapping, dict):
+        mapping = {}
+    return _MatchSettings(
+        unicode_form="NFKC" if form == "NFKC" else "",
+        character_map={
+            key: value for key, value in mapping.items()
+            if isinstance(key, str) and len(key) == 1 and isinstance(value, str) and value
+        },
+        separators=str(matching.get("separators") or ""),
+        max_separator_run=_normalize_int(matching.get("max_separator_run"), 0),
+        ascii_boundaries=matching.get("ascii_boundaries") is True,
+    )
+
+
+def _match_view(text: str, settings: _MatchSettings) -> tuple[str, list[tuple[int, int]]]:
+    """Only the matching view is normalized; each output code point maps back to raw text."""
+    pieces: list[str] = []
+    positions: list[tuple[int, int]] = []
+    for index, char in enumerate(text):
+        normalized = unicodedata.normalize(settings.unicode_form, char) if settings.unicode_form else char
+        mapped = "".join(settings.character_map.get(c, c) for c in normalized)
+        pieces.append(mapped)
+        positions.extend([(index, index + 1)] * len(mapped))
+    return "".join(pieces), positions
+
+
+def _compile_keyword(keyword: Any, settings: _MatchSettings) -> re.Pattern[str] | None:
     text = str(keyword or "").strip()
     if not text:
         return None
-    return re.compile(re.escape(text), re.IGNORECASE)
+    text, _ = _match_view(text, settings)
+    gap = ""
+    if settings.separators and settings.max_separator_run:
+        gap = f"[{re.escape(settings.separators)}]{{0,{settings.max_separator_run}}}"
+    expression = gap.join(re.escape(char) for char in text)
+    if settings.ascii_boundaries:
+        if re.match(r"[A-Za-z0-9_]", text[0]):
+            expression = r"(?<![A-Za-z0-9_])" + expression
+        if re.match(r"[A-Za-z0-9_]", text[-1]):
+            expression += r"(?![A-Za-z0-9_])"
+    return re.compile(expression, re.IGNORECASE)
 
 
 def _compile_pattern(pattern: Any) -> re.Pattern[str] | None:
@@ -336,6 +392,7 @@ def _build_lexicon(data_dir: str, fingerprint: tuple[Any, ...]) -> _Lexicon:
     categories, _, ignore_pattern_texts = _merge_categories(
         list(base.get("categories") or []), overrides
     )
+    matching = _match_settings(base)
 
     rules: list[_Rule] = []
     for item in categories:
@@ -343,13 +400,23 @@ def _build_lexicon(data_dir: str, fingerprint: tuple[Any, ...]) -> _Lexicon:
         if not name:
             continue
         keywords = tuple(
-            compiled for compiled in (_compile_keyword(k) for k in item.get("keywords") or [])
+            compiled for compiled in (_compile_keyword(k, matching) for k in item.get("keywords") or [])
             if compiled is not None
         )
         patterns = tuple(
             compiled for compiled in (_compile_pattern(p) for p in item.get("patterns") or [])
             if compiled is not None
         )
+        # Value templates reuse the exact registered keyword matchers, including boundaries.
+        if keywords:
+            keyword_expression = "(?:" + "|".join(k.pattern for k in keywords) + ")"
+            patterns += tuple(
+                compiled
+                for template in item.get("keyword_patterns") or []
+                if isinstance(template, str) and "{{keyword}}" in template
+                for compiled in [_compile_pattern(template.replace("{{keyword}}", keyword_expression))]
+                if compiled is not None
+            )
         if not keywords and not patterns:
             continue
         rules.append(
@@ -374,6 +441,7 @@ def _build_lexicon(data_dir: str, fingerprint: tuple[Any, ...]) -> _Lexicon:
         ignore_patterns=ignore_patterns,
         sources=(paths["runtime"], paths["overrides"]),
         fingerprint=fingerprint,
+        matching=matching,
     )
 
 
@@ -434,13 +502,21 @@ def _intersects(start: int, end: int, spans: list[tuple[int, int]]) -> bool:
 def _collect_matches(
     text: str, lexicon: _Lexicon
 ) -> list[tuple[int, int, _Rule]]:
+    view, positions = _match_view(text, lexicon.matching)
     ignored = _ignored_spans(text, lexicon)
+    ignored.extend(
+        (positions[start][0], positions[end - 1][1])
+        for start, end in _ignored_spans(view, lexicon) if start < end
+    )
     matches: list[tuple[int, int, _Rule]] = []
     for rule in lexicon.rules:
         for pattern in (*rule.keywords, *rule.patterns):
-            for match in pattern.finditer(text):
+            for match in pattern.finditer(view):
                 start, end = match.span()
-                if start >= end or _intersects(start, end, ignored):
+                if start >= end:
+                    continue
+                start, end = positions[start][0], positions[end - 1][1]
+                if _intersects(start, end, ignored):
                     continue
                 matches.append((start, end, rule))
     return matches
@@ -449,18 +525,22 @@ def _collect_matches(
 def _select_non_overlapping(
     matches: list[tuple[int, int, _Rule]]
 ) -> list[tuple[int, int, _Rule]]:
-    """同级重叠时取更长匹配；高等级优先于低等级。"""
-    ordered = sorted(
-        matches, key=lambda item: (-item[2].sensitivity, -(item[1] - item[0]), item[0])
-    )
+    """重叠范围取并集，泛称仍取高等级/同级最长；不留下被覆盖规则的值尾部。"""
+    ordered = sorted(matches, key=lambda item: (item[0], item[1]))
     selected: list[tuple[int, int, _Rule]] = []
-    occupied: list[tuple[int, int]] = []
+    winning_rank = (-1, -1)
     for start, end, rule in ordered:
-        if _intersects(start, end, occupied):
-            continue
-        selected.append((start, end, rule))
-        occupied.append((start, end))
-    selected.sort(key=lambda item: item[0])
+        rank = (rule.sensitivity, end - start)
+        if selected and start < selected[-1][1]:
+            previous_start, previous_end, previous_rule = selected[-1]
+            selected[-1] = (
+                previous_start, max(previous_end, end),
+                rule if rank > winning_rank else previous_rule,
+            )
+            winning_rank = max(winning_rank, rank)
+        else:
+            selected.append((start, end, rule))
+            winning_rank = rank
     return selected
 
 
@@ -513,6 +593,8 @@ def explain_privacy(text: str, data_dir: str = "") -> dict[str, Any]:
             "policy": rule.policy,
             "sensitivity": rule.sensitivity,
             "text": raw[start:end],
+            "start": start,
+            "end": end,
         }
         for start, end, rule in _collect_matches(raw, lexicon)
     ]
@@ -540,6 +622,25 @@ def restore_private_fields(metadata: dict[str, Any], data_dir: str) -> dict[str,
 
 def _index_fields(metadata: dict[str, Any]) -> dict[str, Any]:
     return {key: metadata[key] for key in _INDEX_FIELDS if key in metadata}
+
+
+def _field_match_text(value: Any) -> str:
+    """Use real newlines, not JSON escapes; split fields still share the privacy boundary."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return "\n".join(_field_match_text(item) for item in value.values())
+    if isinstance(value, list):
+        return "\n".join(_field_match_text(item) for item in value)
+    return str(value) if value is not None else ""
+
+
+def _classify_fields(lexicon: _Lexicon, fields: dict[str, Any]) -> int:
+    # Keep the existing JSON/key classification as well as the unescaped field view.
+    return max(
+        _classify_with(lexicon, json.dumps(fields, ensure_ascii=False, default=str)),
+        _classify_with(lexicon, _field_match_text(fields)),
+    )
 
 
 def _generalize_value(lexicon: _Lexicon, value: Any) -> Any:
@@ -570,7 +671,6 @@ def apply_privacy(
     raw = str(content or "")
     lexicon = load_lexicon(data_dir)
     fields = _index_fields(metadata)
-    recall_text = json.dumps(fields, ensure_ascii=False, default=str)
     atom_levels = []
     for atom in atoms or []:
         atom_metadata = dict(getattr(atom, "metadata", None) or {})
@@ -578,12 +678,12 @@ def apply_privacy(
         atom_levels.append(max(
             sensitivity_level(atom_metadata),
             _classify_with(lexicon, str(atom.content or "")),
-            _classify_with(lexicon, json.dumps(atom_fields, ensure_ascii=False, default=str)),
+            _classify_fields(lexicon, atom_fields),
         ))
     sensitivity = max(
         sensitivity_level(metadata),
         _classify_with(lexicon, raw),
-        _classify_with(lexicon, recall_text),
+        _classify_fields(lexicon, fields),
         *atom_levels,
     )
 

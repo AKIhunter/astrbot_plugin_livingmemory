@@ -1,9 +1,15 @@
+# one_id 投影与访问检查统一由 MemoryEngine 提供。
 """
 统一记忆引擎 - MemoryEngine
 提供统一的记忆管理接口,整合所有底层组件
 """
 
+from functools import partial
+from ..retrieval.vector_search import retrieve_documents
+
 import asyncio
+from functools import partial
+from ..retrieval.vector_search import retrieve_documents
 from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -36,14 +42,19 @@ from ..retrieval.hybrid_retriever import HybridResult, HybridRetriever
 from ..retrieval.memory_index_writer import MemoryIndexWriter
 from ..retrieval.rrf_fusion import RRFFusion
 from ..retrieval.vector_retriever import VectorRetriever
+from .adapter_migrator import AdapterMigrator
 from .memory_engine_batch import MemoryEngineBatchMixin
 from .memory_engine_agentic import MemoryEngineAgenticMixin
 from .memory_engine_crud import MemoryEngineCrudMixin
 from .memory_engine_write_ops import MemoryEngineWriteOpsMixin
+from .memory_engine_identity import MemoryEngineIdentityMixin
 
 
 class MemoryEngine(
-    MemoryEngineWriteOpsMixin, MemoryEngineCrudMixin, MemoryEngineBatchMixin,
+    MemoryEngineIdentityMixin,
+    MemoryEngineWriteOpsMixin,
+    MemoryEngineCrudMixin,
+    MemoryEngineBatchMixin,
     MemoryEngineAgenticMixin,
 ):
     """
@@ -189,6 +200,13 @@ class MemoryEngine(
         # 2. 创建表结构
         await self._create_tables()
 
+        self.adapter_migrator = AdapterMigrator(
+            self.db_path,
+            self.config.get("graph_document_path"),
+            self.config.get("adapter_instances"),
+        )
+        await self.adapter_migrator.migrate()
+
         # 3. 初始化文本处理器
         stopwords_path = self.config.get("stopwords_path")
         self.text_processor = TextProcessor(stopwords_path)
@@ -222,7 +240,7 @@ class MemoryEngine(
             self.graph_store = GraphStore(self.db_path, cache_reads=True)
             await self.graph_store.initialize()
 
-            self.atom_store = AtomStore(self.db_path)
+            self.atom_store = AtomStore(self.db_path, self.config)
             await self.atom_store.initialize()
 
             if self.atom_enabled:
@@ -258,9 +276,8 @@ class MemoryEngine(
                 self.graph_retriever,
                 self.get_memory,
                 self.config,
-                memory_batch_loader=self.faiss_db.document_storage.get_documents,
+                memory_batch_loader=partial(retrieve_documents, self.faiss_db),
             )
-
 
     async def close(self):
         """关闭数据库连接和清理资源"""

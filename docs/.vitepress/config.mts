@@ -1,7 +1,7 @@
 import { defineConfig } from 'vitepress'
 import { withMermaid } from 'vitepress-plugin-mermaid'
 
-const repo = 'https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory'
+const repo = 'https://github.com/AKIhunter/astrbot_plugin_livingmemory'
 
 export default withMermaid(
   defineConfig({
@@ -39,7 +39,7 @@ export default withMermaid(
           next: '下一页'
         },
         editLink: {
-          pattern: `${repo}/edit/master/docs/:path`,
+          pattern: `${repo}/edit/main/docs/:path`,
           text: '在 GitHub 上编辑此页'
         }
       }
@@ -68,14 +68,14 @@ export default withMermaid(
           next: 'Next'
         },
         editLink: {
-          pattern: `${repo}/edit/master/docs/:path`,
+          pattern: `${repo}/edit/main/docs/:path`,
           text: 'Edit this page on GitHub'
         }
       }
     }
   },
   themeConfig: {
-    logo: `${repo}/raw/master/logo.png`,
+    logo: `${repo}/raw/main/logo.png`,
     siteTitle: 'LivingMemory',
     socialLinks: [
       { icon: 'github', link: repo }

@@ -13,6 +13,8 @@ from uuid import UUID, uuid4
 
 from astrbot.api import logger
 
+from .memory_scope import adapter_access, infer_adapter_id
+
 
 @dataclass(frozen=True)
 class Binding:
@@ -262,8 +264,16 @@ class UnifiedContextService:
         engine = getattr(self.plugin.initializer, "memory_engine", None)
         if engine is None:
             return [], "unavailable"
-        items = await engine.search_memories_scoped(
-            query, k=self.source_limit,
-            session_id=binding.session_id, persona_id=binding.persona_id,
+        # 原生事件有适配器上下文，独立插件入口也必须应用相同访问范围。
+        adapter_id = infer_adapter_id(
+            {"session_id": binding.session_id},
+            instances=getattr(engine, "config", {}).get("adapter_instances"),
         )
+        if not adapter_id:
+            return [], "filtered"
+        with adapter_access(self.plugin.config_manager, adapter_id):
+            items = await engine.search_memories_scoped(
+                query, k=self.source_limit,
+                session_id=binding.session_id, persona_id=binding.persona_id,
+            )
         return items, "ok"

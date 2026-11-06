@@ -43,7 +43,7 @@ class TestGroupBySession:
             {"id": 2, "metadata": {"session_id": "s1"}},
             {"id": 3, "metadata": {"session_id": "s2"}},
         ]
-        groups = mgr._group_by_session(candidates)
+        groups = mgr._split_by_scope(candidates)
         by_size = sorted([len(g) for g in groups], reverse=True)
         assert by_size == [2, 1]
 
@@ -54,7 +54,7 @@ class TestGroupBySession:
             {"id": 2, "metadata": {"session_id": None}},
             {"id": 3, "metadata": {"session_id": "s1"}},
         ]
-        groups = mgr._group_by_session(candidates)
+        groups = mgr._split_by_scope(candidates)
         assert len(groups) == 1
         assert len(groups[0]) == 1
 

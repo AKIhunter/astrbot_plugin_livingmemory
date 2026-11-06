@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -21,6 +22,7 @@ class MemoryConsolidationManager:
         self.memory_processor = memory_processor
         self.config_manager = config_manager
         # reflection 触发模式下的最小运行间隔（秒），避免每条消息都触发
+        self.write_lock = asyncio.Lock()
         self._last_run_at = 0.0
         self._min_run_interval = 6 * 3600.0
 
@@ -122,7 +124,7 @@ class MemoryConsolidationManager:
                 for scope_group in self._split_by_scope(semantic_group)
             ]
         else:
-            groups = self._group_by_session(candidates)
+            groups = self._split_by_scope(candidates)
 
         min_per = int(cfg.get("min_memories_per_group", 3))
         groups = [g for g in groups if len(g) >= min_per]
@@ -133,27 +135,27 @@ class MemoryConsolidationManager:
     def _split_by_scope(
         group: list[dict[str, Any]],
     ) -> list[list[dict[str, Any]]]:
-        """按 (session_id, persona_id) 拆分候选，丢弃无会话作用域的旧记忆。"""
-        buckets: dict[tuple[str, Any], list[dict[str, Any]]] = {}
+        """Keep session, persona and adapter ownership separate during consolidation."""
+        buckets: dict[tuple[str, Any, Any], list[dict[str, Any]]] = {}
         for mem in group:
             metadata = mem["metadata"]
             session_id = metadata.get("session_id")
             if not session_id:
                 continue
-            key = (str(session_id), metadata.get("persona_id"))
+            key = (
+                str(session_id),
+                metadata.get("persona_id"),
+                metadata.get("adapter_id"),
+                metadata.get("owner_account", ""),
+                tuple(sorted(metadata.get("subject_accounts") or [])),
+                metadata.get("source_account", ""),
+                metadata.get("source_session_id", ""),
+                metadata.get("audience", ""),
+                metadata.get("visible_to", ""),
+                metadata.get("sensitivity", ""),
+            )
             buckets.setdefault(key, []).append(mem)
         return list(buckets.values())
-
-    def _group_by_session(
-        self, candidates: list[dict[str, Any]]
-    ) -> list[list[dict[str, Any]]]:
-        grouped: dict[str, list[dict[str, Any]]] = {}
-        for mem in candidates:
-            session_id = mem["metadata"].get("session_id")
-            if not session_id:
-                continue
-            grouped.setdefault(str(session_id), []).append(mem)
-        return list(grouped.values())
 
     async def _group_semantic(
         self, candidates: list[dict[str, Any]], cfg: dict[str, Any]
@@ -173,7 +175,7 @@ class MemoryConsolidationManager:
             )
         except Exception as e:
             logger.warning(f"[记忆整合] 语义聚类失败，回退到同会话聚合: {e}")
-            return self._group_by_session(candidates)
+            return self._split_by_scope(candidates)
 
         if not pairs:
             return []
@@ -203,6 +205,8 @@ class MemoryConsolidationManager:
     async def _consolidate_group(
         self, group: list[dict[str, Any]], cfg: dict[str, Any]
     ) -> dict[str, Any]:
+        store = vars(self.memory_engine).get("identity_store")
+        expected_identity_revision = await store.get_revision() if store else None
         merged = await self.memory_processor.merge_memories(group)
 
         summary = merged["summary"]
@@ -217,6 +221,7 @@ class MemoryConsolidationManager:
             raise RuntimeError("整合组缺少会话作用域，无法写出可召回的合并记忆")
 
         metadata = {
+            "adapter_id": group[0]["metadata"].get("adapter_id"),
             "topics": merged["topics"],
             "key_facts": key_facts,
             "persona_summary": summary,
@@ -225,36 +230,50 @@ class MemoryConsolidationManager:
             "consolidated_from": [mem["id"] for mem in group],
             "consolidated_at": time.time(),
         }
+        # 同持有者、账号与受众分组后仍保留来源，不能把合并 scope 当作个人证据。
+        for key in ("owner_account", "subject_accounts", "source_account", "source_session_id",
+                    "audience", "visible_to", "sensitivity", "identity_history_mixed",
+                    "identity_provenance_unknown"):
+            if key in group[0]["metadata"]:
+                metadata[key] = group[0]["metadata"][key]
+        if expected_identity_revision is not None:
+            metadata["identity_revision"] = expected_identity_revision
 
-        new_id = await self.memory_engine.add_memory(
-            content=rich_content,
-            session_id=session_id,
-            persona_id=persona_id,
-            importance=merged["importance"],
-            metadata=metadata,
-        )
+        async with self.write_lock:
+            if store and expected_identity_revision != await store.get_revision():
+                raise RuntimeError("整合期间身份变化，保留原记忆")
+            new_id = await self.memory_engine.add_memory(
+                content=rich_content,
+                session_id=session_id,
+                persona_id=persona_id,
+                importance=merged["importance"],
+                metadata=metadata,
+            )
 
-        old_ids = [mem["id"] for mem in group]
-        try:
-            if cfg.get("keep_original", "archive") == "archive":
-                removed = await self.memory_engine.archive_memories(old_ids)
-            else:
-                removed = await self.memory_engine.batch_delete_memories(old_ids)
-        except Exception:
-            # 新记忆已写入而旧记忆未清理：回滚新记忆，避免下一轮重试重复生成。
+            old_ids = [mem["id"] for mem in group]
             try:
-                await self.memory_engine.delete_memory(new_id)
+                if store and expected_identity_revision != await store.get_revision():
+                    raise RuntimeError("整合提交后身份变化，保留原记忆")
+                if cfg.get("keep_original", "archive") == "archive":
+                    removed = await self.memory_engine.archive_memories(old_ids)
+                else:
+                    removed = await self.memory_engine.batch_delete_memories(old_ids)
             except Exception:
-                logger.error(
-                    f"[记忆整合] 归档失败后回滚新记忆 {new_id} 也失败", exc_info=True
-                )
-            raise
+                # 新记忆已写入而旧记忆未清理：回滚新记忆，避免下一轮重试重复生成。
+                try:
+                    await self.memory_engine.delete_memory(new_id)
+                except Exception:
+                    logger.error(
+                        f"[记忆整合] 归档失败后回滚新记忆 {new_id} 也失败",
+                        exc_info=True,
+                    )
+                raise
 
-        logger.info(
-            f"[记忆整合] 整合 {len(group)} 条记忆 -> 新记忆 {new_id}，"
-            f"{cfg.get('keep_original', 'archive')} {removed} 条旧记忆"
-        )
-        return {"new_id": new_id, "merged": len(group), "removed": removed}
+            logger.info(
+                f"[记忆整合] 整合 {len(group)} 条记忆 -> 新记忆 {new_id}，"
+                f"{cfg.get('keep_original', 'archive')} {removed} 条旧记忆"
+            )
+            return {"new_id": new_id, "merged": len(group), "removed": removed}
 
 
 __all__ = ["MemoryConsolidationManager"]

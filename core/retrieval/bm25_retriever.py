@@ -1,3 +1,4 @@
+# one_id 允许集进入 SQL 候选条件，避免截断后过滤。
 """
 BM25检索器 - 基于SQLite FTS5的稀疏检索
 实现简洁的BM25检索功能,用于MemoryEngine的混合检索
@@ -14,6 +15,8 @@ import aiosqlite
 from astrbot.api import logger
 
 from ..processors.text_processor import TextProcessor
+from ..memory_scope import adapter_sql
+from ..identity_access import identity_sql, identity_current
 
 
 _CJK_RUN = re.compile(r"[一-鿿]+")
@@ -187,6 +190,8 @@ class BM25Retriever:
         """
         if not query or not query.strip():
             return []
+        if not await identity_current():
+            return []
 
         # 预处理查询（异步卸载 jieba 分词到线程池）
         tokens = await self.text_processor.tokenize_async(query, remove_stopwords=True)
@@ -211,6 +216,12 @@ class BM25Retriever:
             f"COALESCE(json_extract({metadata_sql}, '$.status'), 'active') = 'active'"
         ]
         params = [fts_query]
+        adapter_filter, adapter_params = adapter_sql(metadata_sql)
+        filters.append(adapter_filter)
+        params.extend(adapter_params)
+        identity_filter, identity_params = identity_sql("d.id")
+        filters.append(identity_filter)
+        params.extend(identity_params)
         if session_id is not None:
             filters.append(f"json_extract({metadata_sql}, '$.session_id') = ?")
             params.append(session_id)
@@ -259,7 +270,7 @@ class BM25Retriever:
                         # 归一化: (max - score) / range
                         result.score = (max_score - result.score) / score_range
 
-            return results
+            return results if await identity_current() else []
 
     async def delete_document(self, doc_id: int) -> bool:
         """

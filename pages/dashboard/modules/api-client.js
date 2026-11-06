@@ -122,7 +122,9 @@ export class ApiClient {
       return response.data;
     }
     if (response && response.status === "error") {
-      throw new Error(response.message || (window.t ? window.t("misc.requestFailed") : "Request failed"));
+      const error = new Error(response.message || (window.t ? window.t("misc.requestFailed") : "Request failed"));
+      error.code = response.code;
+      throw error;
     }
     return response || {};
   }

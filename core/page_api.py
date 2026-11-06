@@ -1,3 +1,4 @@
+# one_id 管理接口使用宿主认证和统一引擎投影。
 """
 官方插件 Page API 适配层。
 
@@ -10,8 +11,18 @@
 from __future__ import annotations
 
 from typing import Any
+from functools import wraps
+
+from quart import request
+
+from .memory_scope import adapter_access
+from .identity_access import identity_access
+from .identity_keys import identity_alias
+from .page_api_modules.oneid_handler import OneIdHandler
 
 from .page_api_modules.knowledge_handler import KnowledgeHandler
+from .page_api_modules.binding_handler import BindingMixin
+from .person_query import person_memory_ids, record_account, metadata_dict
 from .page_api_modules import (
     BackupHandler,
     ConsolidationHandler,
@@ -46,6 +57,8 @@ class PluginPageApi:
         self.consolidation_handler = ConsolidationHandler(self.utils)
         self.settings_handler = SettingsHandler(self.utils, plugin)
         self.knowledge_handler = KnowledgeHandler(self.utils, plugin)
+        self.binding_handler = BindingMixin(plugin)
+        self.oneid_handler = OneIdHandler(plugin, self.utils)
 
         # BackupHandler 需要 data_dir，延迟初始化
         self._backup_handler = None
@@ -62,7 +75,79 @@ class PluginPageApi:
 
     def register_routes(self) -> None:
         """注册官方插件页面所需的原生 API。"""
-        register = self.plugin.context.register_web_api
+        def register(route, handler, methods, description):
+            @wraps(handler)
+            async def scoped_handler(*args, **kwargs):
+                async def invoke():
+                    payload = await request.get_json(silent=True) or {}
+                    params = {**dict(request.args), **(payload if isinstance(payload, dict) else {})}
+                    target = params.get("one_id") or params.get("person_id")
+                    owner = params.get("owner_one_id")
+                    # 管理身份入口使用它自己的参数；所有记忆读入口共用引擎投影。
+                    if (target or owner) and "/bindings/" not in route and "/identity/" not in route:
+                        from .page_api_modules.oneid_handler import authenticated_operator
+                        from ..storage.oneid_store import IdentityConflict
+                        try:
+                            authenticated_operator()
+                            engine = self.plugin.initializer.memory_engine
+                            target = identity_alias(one_id=params.get("one_id"),
+                                                    person_id=params.get("person_id")) if target else ""
+                            access = await engine.identity_read_access(
+                                one_id=target, owner_one_id=owner or "",
+                                session_id=params.get("session_id") or None,
+                                persona_id=params.get("persona_id") or None,
+                            )
+                            with identity_access(access):
+                                response = await handler(*args, **kwargs)
+                                if not await access.current():
+                                    raise IdentityConflict("身份关联已变化，请刷新")
+                                return response
+                        except PermissionError as exc:
+                            return self.utils.error(str(exc)), 401
+                        except (ValueError, IdentityConflict) as exc:
+                            return self.utils.error(str(exc)), 409
+                    return await handler(*args, **kwargs)
+                adapter_id = request.args.get("adapter_id")
+                # 原生 Bridge 的 apiPost 不接收 URL 查询串；正文沿用同一适配器访问控制。
+                payload = await request.get_json(silent=True) or {}
+                body_adapter = payload.get("adapter_id") if isinstance(payload, dict) else None
+                if adapter_id and body_adapter and adapter_id != body_adapter:
+                    return self.utils.error("URL 与正文的适配器范围不一致"), 400
+                adapter_id = adapter_id or body_adapter
+                if not adapter_id:
+                    return await invoke()
+                with adapter_access(self.plugin.config_manager, adapter_id):
+                    return await invoke()
+
+            self.plugin.context.register_web_api(
+                route, scoped_handler, methods, description
+            )
+
+        # 两组接口都保留；统一使用新版适配器访问范围。
+        for suffix, action, method in (
+            ("entities", "entities", "GET"), ("entities/register", "register", "POST"),
+            ("projection", "projection", "GET"), ("preview", "preview", "GET"),
+            ("applications", "applications", "GET"), ("applications/submit", "submit", "POST"),
+            ("applications/review", "review", "POST"), ("unlink", "unlink", "POST"),
+        ):
+            async def endpoint(action=action):
+                return await self.oneid_handler.handle(action)
+            register(f"{PAGE_API_PREFIX}/identity/{suffix}", endpoint, [method],
+                     "LivingMemory authenticated identity")
+        for suffix, name, method in (
+            ("overview", "overview", "GET"), ("list", "list", "GET"),
+            ("preview", "preview", "GET"), ("save", "save", "POST"),
+            ("revoke", "revoke", "POST"), ("rollback", "rollback", "POST"),
+            ("audit", "audit", "GET"), ("candidates", "candidates", "GET"),
+            ("candidates/review", "candidates_review", "POST"),
+            ("settings", "settings", "GET"), ("settings/save", "settings_save", "POST"),
+            ("upload/preview", "upload_preview", "POST"), ("upload", "upload", "POST"),
+        ):
+            register(f"{PAGE_API_PREFIX}/bindings/{suffix}",
+                     getattr(self.binding_handler, "bindings_" + name), [method],
+                     "LivingMemory binding admin")
+        register(f"{PAGE_API_PREFIX}/bindings/neuron", self.identity_neuron, ["GET"],
+                 "LivingMemory identity neuron")
         for path, handler, method in (
             ("knowledge/catalog", self.knowledge_handler.catalog, "GET"),
             ("knowledge/documents", self.knowledge_handler.documents, "GET"),
@@ -71,11 +156,18 @@ class PluginPageApi:
             ("knowledge/test", self.knowledge_handler.test, "POST"),
         ):
             register(f"{PAGE_API_PREFIX}/{path}", handler, [method], "LivingMemory knowledge admin")
+
         register(
             f"{PAGE_API_PREFIX}/stats",
             self.get_stats,
             ["GET"],
             "LivingMemory Page stats",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/adapters/assign",
+            self.settings_handler.assign_adapter,
+            ["POST"],
+            "Assign adapter ownership to legacy memories",
         )
         register(
             f"{PAGE_API_PREFIX}/memories",
@@ -287,6 +379,22 @@ class PluginPageApi:
         if error:
             return error
         return await self.graph_handler.get_graph_overview(ready["memory_engine"])
+
+    async def identity_neuron(self):
+        from quart import request
+        from .identity import source_account_for
+        person_id = str(request.args.get("person_id") or "").strip()
+        if not person_id:
+            return self.utils.error("请提供唯一用户标识")
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        try:
+            engine = ready["memory_engine"]
+            projection = await engine.project_identity(one_id=person_id)
+            return self.utils.ok({**projection, "total_memories": projection["attributed_memory_count"]})
+        except Exception as exc:
+            return self.utils.error(str(exc))
 
     async def query_graph(self):
         """查询图谱"""

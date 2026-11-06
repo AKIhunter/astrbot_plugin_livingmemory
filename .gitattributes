@@ -6,3 +6,20 @@
 # phantom diff 并污染 blame（参考 #212、#289）。如需统一行尾，请单独开 PR。
 * text=auto
 
+# 市场安装归档不包含开发目录、测试附件或运行态文件。
+/.github export-ignore
+/tests export-ignore
+/benchmarks export-ignore
+/scripts export-ignore
+/docs export-ignore
+/data export-ignore
+/IMPLEMENTATION_PLAN.md export-ignore
+/package*.json export-ignore
+/pytest.ini export-ignore
+/requirements-dev.txt export-ignore
+/.gitignore export-ignore
+/.gitattributes export-ignore
+**/__pycache__ export-ignore
+**/*.pyc export-ignore
+**/._* export-ignore
+**/.DS_Store export-ignore

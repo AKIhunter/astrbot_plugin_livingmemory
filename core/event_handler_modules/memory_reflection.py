@@ -1,17 +1,19 @@
+# one_id 核心接入：保留来源、持有者和反思游标保护。
 """
 记忆反思模块
 负责检查是否需要记忆总结和存储
 """
 
+from contextlib import nullcontext
+
 import asyncio
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
-from astrbot.api.platform import MessageType
 from astrbot.api.provider import LLMResponse
 
 from ..identity import (
@@ -19,6 +21,8 @@ from ..identity import (
     normalize_platform,
     session_ref_for,
     source_account_for,
+    is_synthetic_memory_event,
+    build_identity_context,
 )
 from ..memory_scope import (
     is_event_memory_allowed,
@@ -71,6 +75,8 @@ class _ReflectionPlan:
     retry_count: int
     memory_scope: str
     expected_revision: int | None
+    owner_account: str = ""
+    identity_revision: int | None = None
 
 
 if TYPE_CHECKING:
@@ -204,6 +210,8 @@ class MemoryReflection:
         self, event: AstrMessageEvent, resp: LLMResponse
     ) -> tuple[str, str] | None:
         """过滤不需要反思的响应；返回 (session_id, response_text) 表示可以继续。"""
+        if is_synthetic_memory_event(event):
+            return None
         if not is_event_memory_allowed(self.config_manager, event):
             logger.debug("当前事件不在记忆白名单中，跳过记忆反思")
             return None
@@ -298,7 +306,7 @@ class MemoryReflection:
 
         if last_message.role == "user" and last_checkpoint != checkpoint_id:
             # 被取代的回复会被丢弃而不入库：用 warning 暴露 checkpoint 漂移
-            #（旧->新），避免平台时间戳异常时助手消息被静默丢掉（#289）
+            # （旧->新），避免平台时间戳异常时助手消息被静默丢掉（#289）
             logger.warning(
                 f"[{session_id}] 检测到被取代的回复"
                 f"（checkpoint {last_checkpoint} -> {checkpoint_id}），跳过存储"
@@ -315,6 +323,8 @@ class MemoryReflection:
         self, event: AstrMessageEvent, session_id: str, response_text: str
     ) -> _ReflectionPlan | None:
         """写入助手消息、判断触发条件并计算本次总结窗口。"""
+        if is_synthetic_memory_event(event):
+            return None
         await self.conversation_manager.add_message_from_event(
             event=event,
             role="assistant",
@@ -322,34 +332,17 @@ class MemoryReflection:
         )
         logger.debug(f"[DEBUG-Reflection] [{session_id}] 已添加助手响应消息")
 
-        # 私聊：助手消息写入后也执行消息数量上限控制
-        is_group = event.get_message_type() == MessageType.GROUP_MESSAGE
-        if not is_group:
-            await self.message_utils.enforce_message_limit(session_id)
+        await self.message_utils.enforce_message_limit(session_id)
 
-        session_info = await self.conversation_manager.get_session_info(session_id)
-        if not session_info:
-            logger.warning(
-                f"[DEBUG-Reflection] [{session_id}] session_info 为 None，跳过反思"
-            )
-            return None
-
-        # 获取实际消息数量（用于数据一致性检查）
-        actual_message_count = (
-            await self.conversation_manager.store.get_message_count(session_id)
+        # Read the retained history length used by the reflection cursor.
+        actual_message_count = await self.conversation_manager.store.get_message_count(
+            session_id
         )
 
         # 在读取总结范围之前捕获会话修订号：范围计算与后台任务启动之间
         # 若发生 WebUI 编辑/重试回滚，任务必须整体失效（否则会用回滚前的
         # 消息范围写入已撤销内容）
         expected_revision = await self._read_session_revision(session_id)
-
-        if session_info.message_count != actual_message_count:
-            logger.warning(
-                f"[DEBUG-Reflection] [{session_id}] 数据不一致! "
-                f"sessions表记录={session_info.message_count}, "
-                f"实际消息数={actual_message_count}"
-            )
 
         total_messages = actual_message_count
         trigger_rounds = self.config_manager.get(
@@ -389,7 +382,7 @@ class MemoryReflection:
             f"[{session_id}] 未总结轮数达到 {unsummarized_rounds} 轮，启动记忆反思任务"
         )
         self._schedule_consolidation()
-        return await self._build_reflection_window(
+        plan = await self._build_reflection_window(
             event,
             session_id,
             total_messages,
@@ -397,6 +390,14 @@ class MemoryReflection:
             pending_summary,
             expected_revision,
         )
+        if plan is None or is_synthetic_memory_event(event):
+            return None
+        from dataclasses import replace
+        identity = await build_identity_context(
+            self.config_manager, event, getattr(self.memory_engine, "identity_store", None),
+        )
+        return replace(plan, owner_account=identity.get("owner_account") or "",
+                       identity_revision=identity.get("identity_revision"))
 
     async def _build_reflection_window(
         self,
@@ -431,34 +432,17 @@ class MemoryReflection:
         memory_scope: str,
     ) -> _ReflectionPlan | None:
         """处理待重试范围、窗口切分并取回总结输入消息。"""
-        start_index = last_summarized_index
-        end_index = total_messages
-        retry_count = 0
-
-        if pending_summary:
-            pending_start = pending_summary.get("start_index", start_index)
-            retry_count = pending_summary.get("retry_count", 0)
-            if retry_count >= 3:
-                logger.warning(
-                    f"[{session_id}] 待处理总结已连续失败 {retry_count} 次，放弃该范围 "
-                    f"[{pending_start}:{pending_summary.get('end_index', end_index)}]"
-                )
-                await self.conversation_manager.update_session_metadata(
-                    session_id, "pending_summary", None
-                )
-                await self.conversation_manager.update_session_metadata(
-                    session_id, "last_summarized_index", end_index
-                )
-                return None
-            start_index = pending_start
-            logger.info(
-                f"[{session_id}] 合并待处理失败总结，新范围 [{start_index}:{end_index}], "
-                f"重试次数: {retry_count + 1}/3"
-            )
-
-        if end_index - start_index < 2:
-            logger.debug(f"[{session_id}] 消息数不足一轮对话，跳过总结")
+        max_messages = self.config_manager.get(
+            "reflection_engine.max_messages_per_segment", 120
+        )
+        (
+            start_index,
+            candidate_messages,
+        ) = await self.conversation_manager.get_summary_window(session_id, max_messages)
+        if len(candidate_messages) < 2:
             return None
+        end_index = start_index + len(candidate_messages)
+        retry_count = pending_summary.get("retry_count", 0) if pending_summary else 0
 
         # 窗口切分配置：跨天或空闲间隔超过阈值时从最老片段开始逐段总结，
         # 避免一整段跨天/跨长空闲的对话被合并进同一条记忆。
@@ -474,11 +458,6 @@ class MemoryReflection:
         except (TypeError, ValueError):
             gap_minutes = 180
 
-        candidate_messages = await self.conversation_manager.get_messages_range(
-            session_id=session_id,
-            start_index=start_index,
-            end_index=end_index,
-        )
         split = self._find_window_split_boundary(
             candidate_messages,
             split_by_day=split_by_day,
@@ -502,6 +481,15 @@ class MemoryReflection:
             f"本次总结 {rounds_to_summarize} 轮"
         )
         history_messages = candidate_messages[:messages_to_summarize]
+        if retry_count >= 3:
+            logger.warning(
+                f"[{session_id}] Abandoning failed summary segment [{start_index}:{end_index}]"
+            )
+            await self.conversation_manager.commit_summary_cursor(
+                session_id, history_messages[-1], expected_revision
+            )
+            return None
+
         logger.info(f"[{session_id}] 获取到 {len(history_messages)} 条消息用于总结")
 
         return _ReflectionPlan(
@@ -550,20 +538,12 @@ class MemoryReflection:
             memory_scope,
         )
 
-    def _max_segments_per_run(self) -> int:
-        try:
-            value = int(
-                self.config_manager.get(
-                    "reflection_engine.max_segments_per_run", 10
-                )
-            )
-        except (TypeError, ValueError):
-            value = 10
-        return max(1, min(value, 50))
-
     async def _consume_reflection_segments(self, plan: _ReflectionPlan) -> None:
         """在同一后台任务内逐段消费积压，直到清空或达到单次片段预算。"""
-        max_segments = self._max_segments_per_run()
+        committed_any = False
+        max_segments = self.config_manager.get(
+            "reflection_engine.max_segments_per_run", 10
+        )
         for segment_index in range(max_segments):
             committed = await self._storage_task(
                 plan.session_id,
@@ -574,18 +554,21 @@ class MemoryReflection:
                 plan.retry_count,
                 memory_scope=plan.memory_scope,
                 expected_revision=plan.expected_revision,
+                owner_account=plan.owner_account,
+                identity_revision=plan.identity_revision,
             )
             if not committed:
-                return
+                break
+            committed_any = True
             if self._shutting_down:
-                return
+                break
 
             if segment_index + 1 >= max_segments:
                 logger.debug(
                     f"[{plan.session_id}] 达到单次反思片段上限 {max_segments}，"
                     "停止继续消费"
                 )
-                return
+                break
 
             next_plan = await self._build_next_reflection_plan(
                 plan.session_id,
@@ -600,7 +583,12 @@ class MemoryReflection:
                     f"[{plan.session_id}] 总结游标未向前推进，停止积压消费"
                 )
                 return
+            from dataclasses import replace
+            next_plan = replace(next_plan, owner_account=plan.owner_account,
+                                identity_revision=plan.identity_revision)
             plan = next_plan
+        if committed_any:
+            self._schedule_consolidation()
 
     async def _schedule_reflection(self, plan: _ReflectionPlan) -> None:
         """创建并跟踪后台总结任务；同一会话已有任务在跑时跳过。"""
@@ -608,16 +596,12 @@ class MemoryReflection:
             return
         async with self._storage_state_lock:
             if plan.session_id in self._storage_sessions_inflight:
-                logger.info(
-                    f"[{plan.session_id}] 已有记忆反思任务在执行，跳过本次触发"
-                )
+                logger.info(f"[{plan.session_id}] 已有记忆反思任务在执行，跳过本次触发")
                 return
             self._storage_sessions_inflight.add(plan.session_id)
 
         try:
-            task = asyncio.create_task(
-                self._consume_reflection_segments(plan)
-            )
+            task = asyncio.create_task(self._consume_reflection_segments(plan))
         except Exception:
             self._storage_sessions_inflight.discard(plan.session_id)
             raise
@@ -657,68 +641,74 @@ class MemoryReflection:
             summary was merged into an existing memory, so rollback compensation
             must not delete that pre-existing memory.
         """
-        engine = self.memory_engine
-        if engine is None:
-            return None, False, None
-
-        enabled = True
-        threshold = 0.92
-        limit = 3
-        try:
-            enabled = bool(self.config_manager.get("memory_dedup.enabled", True))
-            threshold = float(
-                self.config_manager.get("memory_dedup.similarity_threshold", 0.92)
-                or 0.92
-            )
-            limit = int(
-                self.config_manager.get("memory_dedup.max_candidates", 3) or 3
-            )
-        except (TypeError, ValueError):
-            enabled, threshold, limit = True, 0.92, 3
-
-        if enabled:
-            try:
-                duplicate = await engine.find_similar_memory(
-                    content,
-                    session_id=memory_scope,
-                    persona_id=persona_id,
-                    threshold=threshold,
-                    limit=limit,
-                )
-                if duplicate is not None:
-                    merged = await engine.merge_duplicate_memory(
-                        int(duplicate["id"]),
-                        importance=importance,
-                        metadata=metadata,
-                        atoms=atoms,
-                        source_messages=source_messages,
-                    )
-                    if merged:
-                        return (
-                            int(duplicate["id"]),
-                            False,
-                            float(duplicate.get("similarity") or 0.0),
-                        )
-                    logger.warning(
-                        f"[{session_id}] 近重复记忆合并失败，改为新增记忆"
-                    )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.warning(
-                    f"[{session_id}] 近重复检测不可用，按新记忆写入", exc_info=True
-                )
-
-        memory_id = await engine.add_memory(
-            content=content,
-            session_id=memory_scope,
-            persona_id=persona_id,
-            importance=importance,
-            metadata=metadata,
-            atoms=atoms,
-            source_messages=source_messages,
+        lock = (
+            self.consolidation_manager.write_lock
+            if self.consolidation_manager is not None
+            else nullcontext()
         )
-        return memory_id, True, None
+        async with lock:
+            engine = self.memory_engine
+            if engine is None:
+                return None, False, None
+
+            enabled = True
+            threshold = 0.92
+            limit = 3
+            try:
+                enabled = bool(self.config_manager.get("memory_dedup.enabled", True))
+                threshold = float(
+                    self.config_manager.get("memory_dedup.similarity_threshold", 0.92)
+                    or 0.92
+                )
+                limit = int(
+                    self.config_manager.get("memory_dedup.max_candidates", 3) or 3
+                )
+            except (TypeError, ValueError):
+                enabled, threshold, limit = True, 0.92, 3
+
+            if enabled:
+                try:
+                    duplicate = await engine.find_similar_memory(
+                        content,
+                        session_id=memory_scope,
+                        persona_id=persona_id,
+                        threshold=threshold,
+                        limit=limit,
+                    )
+                    if duplicate is not None:
+                        merged = await engine.merge_duplicate_memory(
+                            int(duplicate["id"]),
+                            importance=importance,
+                            metadata=metadata,
+                            atoms=atoms,
+                            source_messages=source_messages,
+                        )
+                        if merged:
+                            return (
+                                int(duplicate["id"]),
+                                False,
+                                float(duplicate.get("similarity") or 0.0),
+                            )
+                        logger.warning(
+                            f"[{session_id}] 近重复记忆合并失败，改为新增记忆"
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning(
+                        f"[{session_id}] 近重复检测不可用，按新记忆写入", exc_info=True
+                    )
+
+            memory_id = await engine.add_memory(
+                content=content,
+                session_id=memory_scope,
+                persona_id=persona_id,
+                importance=importance,
+                metadata=metadata,
+                atoms=atoms,
+                source_messages=source_messages,
+            )
+            return memory_id, True, None
 
     async def _read_session_revision(self, session_id: str) -> int | None:
         """读取会话修订号；不可用（老版本/Mock）时返回 None，退化为不校验。"""
@@ -758,28 +748,6 @@ class MemoryReflection:
         await manager.update_session_metadata(session_id, key, value)
         return True
 
-    async def _commit_summary_cursor(
-        self, session_id: str, end_index: int, expected_revision: int | None
-    ) -> bool:
-        """原子推进 ``last_summarized_index`` 并清除 ``pending_summary``。
-
-        回滚会同时钳制这两个游标，因此这里必须与回滚互斥：修订号已变化时
-        不得把游标写回旧位置（否则新消息会被跳过总结）。
-        """
-        committed = await self._commit_session_metadata(
-            session_id, "last_summarized_index", end_index, expected_revision
-        )
-        if not committed:
-            logger.warning(
-                f"[{session_id}] 会话已回滚（修订号变化），"
-                f"放弃把总结游标推进到 {end_index}"
-            )
-            return False
-        await self._commit_session_metadata(
-            session_id, "pending_summary", None, expected_revision
-        )
-        return True
-
     async def _compensate_rolled_back_memory(
         self, session_id: str, memory_id: int
     ) -> None:
@@ -788,26 +756,32 @@ class MemoryReflection:
         游标更新会被修订号校验正确拒绝，但内容此时已经 durable；仅靠"写入前校验"
         无法撤回，因此这里做补偿删除，避免已撤销内容留在长期记忆里。
         """
-        if not self.memory_engine:
-            return
-        try:
-            removed = await self.memory_engine.delete_memory(memory_id)
-        except Exception as exc:
-            logger.error(
-                f"[{session_id}] 回滚补偿删除记忆 {memory_id} 失败: {exc}",
-                exc_info=True,
-            )
-            return
-        if not removed:
-            logger.error(
-                f"[{session_id}] 回滚补偿删除记忆 {memory_id} 未生效"
-                f"（removed={removed}），已撤销内容可能仍可被检索"
-            )
-            return
-        logger.warning(
-            f"[{session_id}] 会话已回滚，已补偿删除刚落库的记忆 {memory_id}"
-            f"，避免已撤销内容污染长期记忆"
+        lock = (
+            self.consolidation_manager.write_lock
+            if self.consolidation_manager is not None
+            else nullcontext()
         )
+        async with lock:
+            if not self.memory_engine:
+                return
+            try:
+                removed = await self.memory_engine.delete_memory(memory_id)
+            except Exception as exc:
+                logger.error(
+                    f"[{session_id}] 回滚补偿删除记忆 {memory_id} 失败: {exc}",
+                    exc_info=True,
+                )
+                return
+            if not removed:
+                logger.error(
+                    f"[{session_id}] 回滚补偿删除记忆 {memory_id} 未生效"
+                    f"（removed={removed}），已撤销内容可能仍可被检索"
+                )
+                return
+            logger.warning(
+                f"[{session_id}] 会话已回滚，已补偿删除刚落库的记忆 {memory_id}"
+                f"，避免已撤销内容污染长期记忆"
+            )
 
     async def _storage_task(
         self,
@@ -819,6 +793,8 @@ class MemoryReflection:
         retry_count: int,
         memory_scope: str | None | object = _DEFAULT_MEMORY_SCOPE,
         expected_revision: int | None = None,
+        owner_account: str = "",
+        identity_revision: int | None = None,
     ) -> bool:
         """总结并提交一个窗口片段；返回是否成功推进总结游标。"""
         from ..utils import OperationContext
@@ -943,8 +919,16 @@ class MemoryReflection:
                         else source_account_for(platform, scene_id)
                     )
                     metadata["visible_to"] = (
-                        f"origin_group" if is_group_chat else "self_private"
+                        "origin_group" if is_group_chat else "self_private"
                     )
+                    metadata["owner_account"] = owner_account
+                    if identity_revision is not None:
+                        metadata["identity_revision"] = identity_revision
+                    metadata["subject_accounts"] = sorted({
+                        source_account_for(platform, getattr(message, "sender_id", ""))
+                        for message in history_messages if getattr(message, "role", "") == "user"
+                    } - {""})
+                    metadata["identity_history_mixed"] = len(metadata["subject_accounts"]) > 1
 
                     logger.info(
                         f"[{session_id}] 已使用LLM生成结构化记忆, "
@@ -1014,48 +998,12 @@ class MemoryReflection:
                             f"[{session_id}] 成功存储对话记忆（{len(history_messages)}条消息，重要性={importance:.2f}）"
                         )
 
-                # 成功：更新已总结的位置，清除待处理记录（原子校验修订号，
-                # 避免把游标写回回滚前的旧位置）
-                if self.conversation_manager is None:
-                    return False
-
-                try:
-                    committed = await self._commit_summary_cursor(
-                        session_id, end_index, expected_revision
-                    )
-                    if committed:
-                        logger.info(
-                            f"[{session_id}] 更新滑动窗口位置: last_summarized_index = {end_index}"
-                        )
-                        return True
-                    if memory_id is not None and memory_created:
-                        # 修订号校验发生在写入之前：等待期间若发生回滚，
-                        # 刚落库的记忆属于已撤销内容，必须补偿删除
-                        await self._compensate_rolled_back_memory(
-                            session_id, memory_id
-                        )
-                    return False
-                except Exception as meta_err:
-                    logger.error(
-                        f"[{session_id}] 记忆已存储但元数据更新失败: {meta_err}。"
-                        "下次触发时将跳过本段消息，避免重复总结。",
-                        exc_info=True,
-                    )
-                    # Advance the index anyway to prevent re-processing the
-                    # same message range (memory is already stored durably).
-                    try:
-                        committed = await self._commit_summary_cursor(
-                            session_id, end_index, expected_revision
-                        )
-                        if committed:
-                            return True
-                    except Exception:
-                        logger.error(
-                            f"[{session_id}] 重试元数据更新仍然失败，"
-                            "可能出现重复总结。",
-                            exc_info=True,
-                        )
-                    return False
+                committed = await self.conversation_manager.commit_summary_cursor(
+                    session_id, history_messages[-1], expected_revision
+                )
+                if not committed and memory_id is not None and memory_created:
+                    await self._compensate_rolled_back_memory(session_id, memory_id)
+                return committed
 
             except asyncio.CancelledError:
                 # 回滚会 cancel 本任务；取消在 await 点生效并穿透 except Exception。

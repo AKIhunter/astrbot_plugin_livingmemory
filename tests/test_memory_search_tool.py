@@ -18,6 +18,7 @@ SESSION_ID = "test:FriendMessage:session-1"
 def memory_engine():
     engine = Mock()
     engine.identity_store = None
+    engine.validate_identity_results = AsyncMock(side_effect=lambda rows: rows)
     engine.search_memories = AsyncMock(side_effect=AssertionError("unscoped search"))
     engine.search_memories_for_identity = AsyncMock(return_value=[])
     yield engine
@@ -36,6 +37,7 @@ def _make_run_context():
     event.get_extra.return_value = None
     event.get_platform_name.return_value = "test"
     event.get_sender_id.return_value = "user-1"
+    event.get_self_id.return_value = "bot-1"
 
     run_context = Mock()
     run_context.context = Mock()
