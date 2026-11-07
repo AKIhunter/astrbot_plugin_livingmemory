@@ -4,7 +4,7 @@ Tests for CommandHandler.
 
 import inspect
 import json
-from unittest.mock import ANY, AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock
 
 import aiosqlite
 import pytest
@@ -20,9 +20,6 @@ def config_manager():
 @pytest.fixture
 def memory_engine():
     engine = Mock()
-    engine.identity_store = None
-    engine.validate_identity_results = AsyncMock(side_effect=lambda rows: rows)
-    engine.search_memories = AsyncMock(side_effect=AssertionError("unscoped search"))
     engine.db_path = "/tmp/livingmemory-test.db"
     engine.get_statistics = AsyncMock(
         return_value={
@@ -31,20 +28,10 @@ def memory_engine():
             "newest_memory": 1_700_000_000.0,
         }
     )
-    engine.search_memories_for_identity = AsyncMock(return_value=[])
+    engine.search_memories = AsyncMock(return_value=[])
     engine.delete_memory = AsyncMock(return_value=True)
     engine.rebuild_graph_index = AsyncMock(return_value={"rebuilt": 0, "skipped": 0})
-    yield engine
-    engine.search_memories.assert_not_awaited()
-
-
-@pytest.fixture(autouse=True)
-def search_persona(monkeypatch):
-    from astrbot_plugin_livingmemory.core import utils
-
-    lookup = AsyncMock(return_value="persona_a")
-    monkeypatch.setattr(utils, "get_persona_id", lookup)
-    return lookup
+    return engine
 
 
 @pytest.fixture
@@ -129,26 +116,18 @@ async def test_handle_status_error_contains_suggestions(
 async def test_handle_search_validates_inputs_and_calls_engine(handler, mock_event):
     empty = [msg async for msg in handler.handle_search(mock_event, "", 3)]
     assert "不能为空" in empty[0]
-    handler.memory_engine.search_memories_for_identity.assert_not_awaited()
 
-    mock_event.unified_msg_origin = "test:FriendMessage:session-1"
     _ = [msg async for msg in handler.handle_search(mock_event, "hello", 200)]
     # k should be clamped to 100.
-    handler.memory_engine.search_memories_for_identity.assert_awaited_with(
-        query="hello", k=100, identity=ANY, persona_id="persona_a"
+    handler.memory_engine.search_memories.assert_awaited_with(
+        query="hello", k=100, session_id=mock_event.unified_msg_origin
     )
-    identity = handler.memory_engine.search_memories_for_identity.await_args.kwargs["identity"]
-    assert identity["scope"] == mock_event.unified_msg_origin
-    assert identity["legacy_scopes"] == [mock_event.unified_msg_origin]
-    assert identity["audience"] == "self_private"
-    assert identity["source_account"] == "test:user-1"
-    assert identity["persona_id"] == "persona_a"
 
 
 @pytest.mark.asyncio
 async def test_handle_search_renders_results(handler, mock_event, memory_engine):
     result = Mock(doc_id=7, final_score=0.88, content="hello memory")
-    memory_engine.search_memories_for_identity = AsyncMock(return_value=[result])
+    memory_engine.search_memories = AsyncMock(return_value=[result])
 
     messages = [msg async for msg in handler.handle_search(mock_event, "hello", 5)]
     assert len(messages) == 1
@@ -276,7 +255,7 @@ async def test_handle_search_renders_dual_route_breakdown(
             "graph_vector_score": 0.44,
         },
     )
-    memory_engine.search_memories_for_identity = AsyncMock(return_value=[result])
+    memory_engine.search_memories = AsyncMock(return_value=[result])
 
     messages = [msg async for msg in handler.handle_search(mock_event, "graph", 5)]
     assert len(messages) == 1

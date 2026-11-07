@@ -188,6 +188,44 @@ async def test_timeout_retains_other_source_and_cleans_tasks():
     assert engine.search_memories_scoped.call_args.kwargs["session_id"] == SESSION["session_id"]
 
 
+@pytest.mark.parametrize("shared,expected", [
+    (None, None),
+    ([], ("qq-instance",)),
+    (["qq-instance", "another"], ("another", "qq-instance")),
+])
+@pytest.mark.asyncio
+async def test_session_entry_uses_adapter_policy_and_restores_context(shared, expected):
+    from astrbot_plugin_livingmemory.core.memory_scope import current_adapter_access
+
+    service, _, _, config = setup_service(SESSION)
+    config["filtering_settings"] = {"shared_adapter_ids": shared}
+    service.plugin.config_manager = ConfigManager(config)
+    engine = service.plugin.initializer.memory_engine
+    engine.config = {"adapter_instances": {"qq-instance": "qq"}}
+    observed = []
+
+    async def scoped_search(*args, **kwargs):
+        access = current_adapter_access.get()
+        observed.append((access.adapter_id, access.adapter_ids))
+        return []
+
+    engine.search_memories_scoped.side_effect = scoped_search
+    await search(service, purpose="session", session_id=SESSION["session_id"])
+    assert observed == [("qq-instance", expected)]
+    assert current_adapter_access.get() is None
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_legacy_adapter_cannot_open_session_experiences():
+    service, _, _, _ = setup_service(SESSION)
+    engine = service.plugin.initializer.memory_engine
+    engine.config = {"adapter_instances": {"qq-one": "qq", "qq-two": "qq"}}
+    result = await search(service, purpose="session", session_id=SESSION["session_id"])
+    assert result["sources"]["experiences"] == "filtered"
+    assert result["experiences"] == []
+    engine.search_memories_scoped.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_caller_capacity_rejects_before_expensive_work():
     service, _, _, _ = setup_service()
@@ -216,8 +254,7 @@ async def test_text_budget_and_no_sensitive_audit(caplog):
 ])
 @pytest.mark.asyncio
 async def test_experience_rechecks_current_row_scope_and_status(change):
-    session_id = "qq:FriendMessage:owner"
-    metadata = {"session_id": session_id, "persona_id": "persona", "status": "active", **change}
+    metadata = {"session_id": "session", "persona_id": "persona", "status": "active", **change}
     result = HybridResult(
         doc_id=1, content="private", metadata={}, final_score=1, rrf_score=1,
         bm25_score=None, vector_score=None,
@@ -229,18 +266,14 @@ async def test_experience_rechecks_current_row_scope_and_status(change):
         _filter_by_retrieval_policy=lambda rows: rows,
     )
     rows = await MemoryEngineCrudMixin.search_memories_scoped(
-        host, "test", session_id=session_id, persona_id="persona"
+        host, "test", session_id="session", persona_id="persona"
     )
     assert rows == []
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("session_id,allowed", [
-    ("qq:FriendMessage:owner", True),
-    ("session", False),
-])
-async def test_experience_live_row_is_returned_without_private_metadata(session_id, allowed):
-    metadata = {"session_id": session_id, "persona_id": "persona", "status": "active", "secret": "PRIVATE_METADATA"}
+async def test_experience_live_row_is_returned_without_private_metadata():
+    metadata = {"session_id": "session", "persona_id": "persona", "status": "active", "secret": "PRIVATE_METADATA"}
     result = HybridResult(
         doc_id=1, content="content", metadata={}, final_score=1, rrf_score=1,
         bm25_score=None, vector_score=None,
@@ -252,11 +285,10 @@ async def test_experience_live_row_is_returned_without_private_metadata(session_
         _filter_by_retrieval_policy=lambda rows: rows,
     )
     rows = await MemoryEngineCrudMixin.search_memories_scoped(
-        host, "test", session_id=session_id, persona_id="persona"
+        host, "test", session_id="session", persona_id="persona"
     )
-    expected = [{"source": "experience", "memory_id": 1, "content": "content"}] if allowed else []
-    assert rows == expected
+    assert rows == [{"source": "experience", "memory_id": 1, "content": "content"}]
     host.get_memory.return_value["text"] = "revised"
     assert await MemoryEngineCrudMixin.search_memories_scoped(
-        host, "test", session_id=session_id, persona_id="persona"
+        host, "test", session_id="session", persona_id="persona"
     ) == []

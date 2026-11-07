@@ -13,7 +13,7 @@ from astrbot_plugin_livingmemory.core.managers.memory_engine import MemoryEngine
 
 from tests.test_graph_memory import _FakeFaissDB
 
-SESSION_ID = "test:FriendMessage:user-1"
+SESSION_ID = "smoke-session"
 PERSONA_ID = "persona_smoke"
 MEMORY_CONTENT = "project sync record"
 MEMORY_METADATA = {
@@ -66,8 +66,6 @@ def _make_event(query: str):
     event.get_message_str = Mock(return_value=query)
     event.get_messages = Mock(return_value=[])
     event.get_platform_name = Mock(return_value="test")
-    event.get_group_id = Mock(return_value="")
-    event.get_extra = Mock(return_value=None)
     event.plain_result = lambda message: message
     return event
 

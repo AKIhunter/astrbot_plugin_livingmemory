@@ -1,6 +1,6 @@
 # Docs Deployment
 
-This repository includes VitePress configuration and GitHub Actions workflows. CI validates documentation builds. Pages deployment for this maintained fork must be verified separately; a push is not proof that a site is live. Read the repository docs when Pages is unavailable.
+This repository now includes VitePress configuration and a GitHub Actions workflow. After pushing to `main` or `master`, GitHub Actions builds the docs and deploys them to GitHub Pages.
 
 ## Local preview
 
@@ -40,11 +40,11 @@ After the version change merges to the default branch, `Auto Release on Version 
 Default Pages URL:
 
 ```text
-https://akihunter.github.io/astrbot_plugin_livingmemory/
+https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/
 ```
 
 English docs:
 
 ```text
-https://akihunter.github.io/astrbot_plugin_livingmemory/en/
+https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/
 ```

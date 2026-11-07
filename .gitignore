@@ -118,26 +118,3 @@ docs/WEBUI_REDESIGN_PLAN.md
 WEBUI_REFACTOR_PLAN.md
 PAGE_API_REFACTOR_PROGRESS.md
 SESSION_SUMMARY_*.md
-
-# Private deployment data and credentials must stay outside release history.
-.env.*
-!.env.example
-!.env.sample
-.ssh/
-*.pem
-*.key
-*.p12
-*.pfx
-credentials.json
-credentials-*.json
-*_credentials.json
-cmd_config.json
-*_config.json
-plugin_data/
-backups/
-*.sqlite
-*.sqlite3
-*.sqlite-shm
-*.sqlite-wal
-*.sqlite3-shm
-*.sqlite3-wal

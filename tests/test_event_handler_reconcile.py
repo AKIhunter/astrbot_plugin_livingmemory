@@ -3,19 +3,14 @@ Event handler tests: WebUI edit/retry reconciliation and reflection guards.
 """
 
 import asyncio
-import json
 import logging
-import time
-from datetime import datetime
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from astrbot_plugin_livingmemory.core.base.config_manager import ConfigManager
-from astrbot_plugin_livingmemory.core.event_handler import EventHandler
-
-from astrbot.api.platform import MessageType
-
+from tests.event_handler_support import conversation_manager as conversation_manager
+from tests.event_handler_support import handler as handler
+from tests.event_handler_support import memory_engine as memory_engine
+from tests.event_handler_support import memory_processor as memory_processor
 
 
 from tests.event_handler_support import (
@@ -24,10 +19,6 @@ from tests.event_handler_support import (
     _make_req,
     _make_resp,
     _seed_turns,
-    conversation_manager,
-    handler,
-    memory_engine,
-    memory_processor,
 )
 
 # ==================== WebUI 编辑/重试历史对账测试 ====================
@@ -37,7 +28,7 @@ from tests.event_handler_support import (
 async def test_edit_resend_reconciles_store_to_llm_history(tmp_path):
     """编辑上一条消息并重发（整轮回滚）：库内旧轮应被清理，当前轮只存一次。"""
     handler, manager, store = await _make_real_handler(tmp_path)
-    sid = "test:FriendMessage:sid-1"
+    sid = "test:private:sid-1"
     await manager.add_message(
         session_id=sid,
         role="user",
@@ -80,7 +71,7 @@ async def test_edit_resend_reconciles_store_to_llm_history(tmp_path):
 async def test_regenerate_reconciles_reverted_tail(tmp_path):
     """重试上一条对话：库内被撤销的尾轮应被删除，头部轮次保留。"""
     handler, manager, store = await _make_real_handler(tmp_path)
-    sid = "test:FriendMessage:sid-1"
+    sid = "test:private:sid-1"
     for checkpoint, user_text, bot_text in (
         ("C1", "q1", "a1"),
         ("C2", "q2", "a2"),
@@ -130,7 +121,7 @@ async def test_regenerate_reconciles_reverted_tail(tmp_path):
 async def test_reconcile_skips_group_events(tmp_path):
     """群聊事件不应触发对账（被动捕获的消息不在 LLM 历史中）。"""
     handler, manager, store = await _make_real_handler(tmp_path)
-    sid = "test:FriendMessage:sid-1"
+    sid = "test:private:sid-1"
     await manager.add_message(
         session_id=sid,
         role="user",
@@ -170,7 +161,7 @@ async def test_reconcile_skips_group_events(tmp_path):
 async def test_reconcile_skips_without_checkpoints(tmp_path):
     """非 webchat：contexts 与库内均无 checkpoint → 零行为变化。"""
     handler, manager, store = await _make_real_handler(tmp_path)
-    sid = "test:FriendMessage:sid-1"
+    sid = "test:private:sid-1"
     await manager.add_message(
         session_id=sid,
         role="user",
@@ -208,7 +199,7 @@ async def test_reconcile_skips_without_checkpoints(tmp_path):
 async def test_reflection_guard_skips_stale_assistant(tmp_path):
     """重试瞬间迟到的旧 bot 回复应被跳过，不污染会话库。"""
     handler, manager, store = await _make_real_handler(tmp_path)
-    sid = "test:FriendMessage:sid-1"
+    sid = "test:private:sid-1"
     await manager.add_message(
         session_id=sid,
         role="user",
@@ -232,7 +223,7 @@ async def test_reflection_guard_skips_stale_assistant(tmp_path):
 async def test_reflection_guard_logs_warning_for_superseded_reply(tmp_path, caplog):
     """#289：被取代的回复被丢弃时必须告警，并带上 session 与旧->新 checkpoint。"""
     handler, manager, store = await _make_real_handler(tmp_path)
-    sid = "test:FriendMessage:sid-1"
+    sid = "test:private:sid-1"
     await manager.add_message(
         session_id=sid,
         role="user",
@@ -265,7 +256,7 @@ async def test_reflection_guard_logs_warning_for_superseded_reply(tmp_path, capl
 async def test_reflection_guard_stores_matching_assistant(tmp_path):
     """checkpoint 匹配时助手消息正常入库，且带 checkpoint 标记。"""
     handler, manager, store = await _make_real_handler(tmp_path)
-    sid = "test:FriendMessage:sid-1"
+    sid = "test:private:sid-1"
     await manager.add_message(
         session_id=sid,
         role="user",
@@ -288,9 +279,7 @@ async def test_reflection_guard_stores_matching_assistant(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_reconcile_gated_on_checkpoint_extra(
-    handler, conversation_manager
-):
+async def test_reconcile_gated_on_checkpoint_extra(handler, conversation_manager):
     """非 webchat（事件无 llm_checkpoint_id extra）不触发对账，避免每次读库。"""
     # 无 checkpoint extra（Mock 自动返回 Mock，非 str）→ 不调用对账
     event = _make_event(group=False)
@@ -311,7 +300,7 @@ async def test_reconcile_gated_on_checkpoint_extra(
 async def test_image_turn_does_not_break_reconciliation(tmp_path):
     """纯图片轮次（user 行未入库）不应让对账静默失效；回滚仍被清理。"""
     handler, manager, store = await _make_real_handler(tmp_path)
-    sid = "test:FriendMessage:sid-1"
+    sid = "test:private:sid-1"
 
     for role, content, checkpoint in (
         ("user", "q1", "C1"),
@@ -382,7 +371,7 @@ async def test_image_turn_does_not_break_reconciliation(tmp_path):
 async def test_reflection_guard_allows_image_turn_reply(tmp_path):
     """库尾为 assistant 且 checkpoint 不同（纯图片轮次回复）应正常入库。"""
     handler, manager, store = await _make_real_handler(tmp_path)
-    sid = "test:FriendMessage:sid-1"
+    sid = "test:private:sid-1"
     await manager.add_message(
         session_id=sid,
         role="user",
@@ -420,7 +409,7 @@ async def test_reflection_guard_allows_image_turn_reply(tmp_path):
 async def test_rollback_bumps_revision_and_cancels_inflight_task(tmp_path):
     """检测到回滚时：推进会话修订号，并取消该会话进行中的总结任务。"""
     handler, manager, store = await _make_real_handler(tmp_path)
-    sid = "test:FriendMessage:sid-1"
+    sid = "test:private:sid-1"
     await _seed_turns(manager, sid, ("C1", "C2"))
     assert await manager.get_session_revision(sid) == 0
 
@@ -459,7 +448,7 @@ async def test_slow_summary_discarded_when_rollback_happens(tmp_path):
     engine.search_memories = AsyncMock(return_value=[])
     engine.add_memory = AsyncMock(return_value=1)
     handler, manager, store = await _make_real_handler(tmp_path, memory_engine=engine)
-    sid = "test:FriendMessage:sid-1"
+    sid = "test:private:sid-1"
     await _seed_turns(manager, sid, ("C1", "C2"))
 
     messages = await manager.get_messages_range(sid, 0, 4)
@@ -503,7 +492,7 @@ async def test_failed_summary_does_not_record_pending_after_rollback(tmp_path):
     engine.search_memories = AsyncMock(return_value=[])
     engine.add_memory = AsyncMock(return_value=1)
     handler, manager, store = await _make_real_handler(tmp_path, memory_engine=engine)
-    sid = "test:FriendMessage:sid-1"
+    sid = "test:private:sid-1"
     await _seed_turns(manager, sid, ("C1", "C2"))
     messages = await manager.get_messages_range(sid, 0, 4)
 
@@ -533,28 +522,25 @@ async def test_failed_summary_does_not_record_pending_after_rollback(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_summary_cursor_commit_is_rejected_after_revision_change(
-    handler, conversation_manager
-):
-    """游标写入必须原子校验修订号：回滚后拒绝把 last_summarized_index 写回旧位置。"""
-    conversation_manager.update_session_metadata_if_revision = AsyncMock(
-        return_value=False
-    )
-    conversation_manager.update_session_metadata = AsyncMock()
-
-    committed = await handler._memory_reflection._commit_session_metadata(
-        "s1", "last_summarized_index", 12, 3
-    )
-
-    assert committed is False
-    conversation_manager.update_session_metadata.assert_not_awaited()
+async def test_summary_cursor_commit_is_rejected_after_revision_change(tmp_path):
+    handler, manager, store = await _make_real_handler(tmp_path)
+    sid = "test:private:stale-summary"
+    try:
+        await _seed_turns(manager, sid, ("C1",))
+        messages = await manager.get_messages_range(sid, 0, 2)
+        await manager.bump_session_revision(sid)
+        assert await manager.commit_summary_cursor(sid, messages[-1], 0) is False
+        assert await manager.get_session_metadata(sid, "last_summarized_index", 0) == 0
+    finally:
+        await handler.shutdown()
+        await store.close()
 
 
 @pytest.mark.asyncio
 async def test_metadata_update_if_revision_rejects_stale_revision(tmp_path):
     """会话修订号变化后，带校验的元数据写入必须被拒绝。"""
     handler, manager, store = await _make_real_handler(tmp_path)
-    sid = "test:FriendMessage:sid-1"
+    sid = "test:private:sid-1"
     await _seed_turns(manager, sid, ("C1",))
 
     assert (
@@ -588,7 +574,7 @@ async def test_storage_task_aborts_when_caller_revision_is_stale(tmp_path):
     engine.search_memories = AsyncMock(return_value=[])
     engine.add_memory = AsyncMock(return_value=1)
     handler, manager, store = await _make_real_handler(tmp_path, memory_engine=engine)
-    sid = "test:FriendMessage:sid-1"
+    sid = "test:private:sid-1"
     await _seed_turns(manager, sid, ("C1", "C2"))
     messages = await manager.get_messages_range(sid, 0, 4)
 

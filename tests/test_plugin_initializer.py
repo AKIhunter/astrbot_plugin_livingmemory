@@ -19,11 +19,11 @@ from astrbot_plugin_livingmemory.core.plugin_initializer import PluginInitialize
 @pytest.fixture
 def mock_context():
     context = Mock()
+    context.platform_manager.get_insts.return_value = []
+    context.get_config.return_value = {"platform": []}
     context.get_provider_by_id = Mock(return_value=None)
     context.get_all_embedding_providers = Mock(return_value=[])
     context.get_using_provider = Mock(return_value=None)
-    context.get_config = Mock(return_value={"platform": []})
-    context.platform_manager.get_insts = Mock(return_value=[])
     return context
 
 
@@ -87,9 +87,7 @@ def test_check_faiss_runtime_raises_actionable_error(monkeypatch, initializer):
         stdout="",
         stderr="Illegal instruction",
     )
-    monkeypatch.setattr(
-        faiss_mod.subprocess, "run", Mock(return_value=result)
-    )
+    monkeypatch.setattr(faiss_mod.subprocess, "run", Mock(return_value=result))
 
     with pytest.raises(InitializationError, match="CPU 或运行环境可能不兼容"):
         initializer._check_faiss_runtime()
@@ -101,15 +99,12 @@ def test_check_faiss_runtime_reports_binding_mismatch(monkeypatch, initializer):
         returncode=1,
         stdout="",
         stderr=(
-            "NameError: name 'SuperKMeans' is not defined. "
-            "Did you mean: 'SuperKmeans'?"
+            "NameError: name 'SuperKMeans' is not defined. Did you mean: 'SuperKmeans'?"
         ),
     )
     run = Mock(return_value=result)
     monkeypatch.setattr(faiss_mod.subprocess, "run", run)
-    monkeypatch.setattr(
-        faiss_mod.metadata, "version", Mock(return_value="1.14.2")
-    )
+    monkeypatch.setattr(faiss_mod.metadata, "version", Mock(return_value="1.14.2"))
 
     with pytest.raises(InitializationError) as exc_info:
         initializer._check_faiss_runtime()
@@ -389,14 +384,6 @@ async def test_complete_initialization_wires_graph_db_and_engine_config(
             self.config = config or {}
             self.text_processor = Mock(async_init=AsyncMock())
 
-        @__import__("contextlib").asynccontextmanager
-        async def _write_transaction(self):
-            # IdentityStore协调接口要求；业务初始化断言保持不变。
-            yield None
-
-        def _invalidate_search_cache(self):
-            return None
-
         async def initialize(self):
             return None
 
@@ -565,14 +552,6 @@ async def test_complete_initialization_skips_graph_db_when_disabled(
             self.llm_provider = llm_provider
             self.config = config or {}
             self.text_processor = Mock(async_init=AsyncMock())
-
-        @__import__("contextlib").asynccontextmanager
-        async def _write_transaction(self):
-            # IdentityStore协调接口要求；真实事务由OneID集成测试覆盖。
-            yield None
-
-        def _invalidate_search_cache(self):
-            return None
 
         async def initialize(self):
             return None

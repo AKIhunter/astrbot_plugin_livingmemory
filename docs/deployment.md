@@ -1,6 +1,6 @@
 # 部署文档站
 
-本仓库包含 VitePress 配置和 GitHub Actions workflow。CI会验证文档构建；本维护fork的GitHub Pages是否已经部署需独立核验，不将推送等同于站点上线。尚未启用Pages时请直接阅读仓库docs目录。
+本仓库已经包含 VitePress 配置和 GitHub Actions workflow。推送到 `main` 或 `master` 后，GitHub Actions 会自动构建并部署到 GitHub Pages。
 
 ## 本地预览
 
@@ -40,11 +40,11 @@ docs/.vitepress/dist
 默认 Pages 地址为：
 
 ```text
-https://akihunter.github.io/astrbot_plugin_livingmemory/
+https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/
 ```
 
 英文文档：
 
 ```text
-https://akihunter.github.io/astrbot_plugin_livingmemory/en/
+https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/
 ```

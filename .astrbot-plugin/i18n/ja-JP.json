@@ -282,6 +282,10 @@
       "isolated_sessions": {
         "description": "セッションを強制分離",
         "hint": "1 行に 1 つずつ完全なセッション ID を入力します。これらのセッションは常に独立したメモリスコープを使用し、user、global、または旧版のセッションフィルター無効設定の影響を受けません。"
+      },
+      "shared_adapter_ids": {
+        "description": "記憶を共有するアダプター",
+        "hint": ""
       }
     },
     "reflection_engine": {
@@ -306,6 +310,9 @@
       "source_retention_importance_threshold": {
         "description": "原文保持の重要度しきい値",
         "hint": "要約の重要度がこの値に達した場合、元のメッセージを個別に保存し、詳細確認、Agent による深い遡及、再要約に利用できます。範囲は 0〜1 で、1 にすると満点の記憶のみ保持します。"
+      },
+      "max_messages_per_segment": {
+        "description": "要約区間あたりのメッセージ上限"
       }
     },
     "agent_tools": {

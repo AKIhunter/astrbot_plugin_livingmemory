@@ -1,12 +1,25 @@
 # Releases and Upgrades
 
-## 2.10.0 · November 6, 2026
+## 2.9.0 · November 3, 2026
 
-This maintained fork preserves the deployed 2.9.0 runtime, OneID, privacy controls and existing pages. Optional long-term retention protects unique events and facts while sampling repeated routines. It is disabled by default and does not restore deleted or expired memories.
+2.9.0 adds adapter sharing and legacy ownership migration, with fixes for reflection backlog, history trimming and consolidation isolation. Existing vectors and document IDs are retained without regenerating embeddings.
 
-[Download 2.10.0 and the complete synthetic benchmark](https://github.com/AKIhunter/astrbot_plugin_livingmemory/releases/tag/2.10.0). Back up data, configuration and both vector indexes before upgrading.
+[Download 2.9.0](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases/tag/2.9.0)
 
-Historical results: 3,580 of 18,260 principal records retained, 84.3% strict accuracy, 89.8% semantic accuracy and 88.1% positive evidence completeness at five results. The original 90% target was missed by one question. Candidate controls and production checks are reported separately in the release evidence.
+### What changed
+
+- **Adapter sharing**: select sharing instances while retaining session, user-scope and persona restrictions. Recover identifiable legacy ownership; assign ambiguous records or transfer an old instance in settings, with SQLite backups before changes. See [#384](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/pull/384).
+- **Bounded reflection and retention**: each input has at most `max_messages_per_segment` messages, default 120, with continuous backlog processing within the existing segment budget. Enforce the `max_messages_per_session` hard cap even at cursor zero: remove summarized messages first, then the oldest unsummarized buffered messages if necessary, with a warning.
+- **Cursors and consolidation**: coordinate snapshot reads with head trimming and commit by message ID/time so retries do not skip later segments. Consolidation and reflection persist mutually exclusively while LLM inference stays concurrent; session grouping also preserves personas and adapter ownership. See [#386](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/pull/386).
+
+Contributed by [@lxfight](https://github.com/lxfight). The latest complete suite passed 1,203 backend and 150 frontend tests. Validation covers adapter migration, real SQLite/FAISS, concurrent trimming and multiple Chrome viewport sizes.
+
+### Install and upgrade
+
+1. Stop the plugin and back up its full data directory. Raise `max_messages_per_session` or export history first if all unsummarized source messages must be retained; the hard cap can discard content not yet stored as memory.
+2. Update to `2.9.0`, restart AstrBot and reopen Plugin Views. After configuring a sharing list, unselected and newly added instances are isolated; session isolation still separates actual sessions.
+3. Ownership changes preserve `session_id`. Before a manual bulk transfer, pause affected adapters and wait for summaries to finish. Ambiguous legacy records need explicit assignment.
+4. The database file-open failure in [#345](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/issues/345) remains open pending new diagnostic logs.
 
 ## 2.8.4 · November 1, 2026
 

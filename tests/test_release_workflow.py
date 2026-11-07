@@ -35,7 +35,6 @@ def test_release_notes_preserve_pr_credits_and_reject_missing_section(
             **os.environ,
             "RELEASE_VERSION": version,
             "PREVIOUS_VERSION": "2.6.1",
-            "PREVIOUS_SHA": "a" * 40,
             "RELEASE_REPOSITORY": "example/plugin",
         },
         capture_output=True,
@@ -53,7 +52,7 @@ def test_release_notes_preserve_pr_credits_and_reject_missing_section(
     notes = output.read_text(encoding="utf-8")
     assert credits in notes
     assert "Old release notes" not in notes
-    assert f"compare/{'a' * 40}...{version}" in notes
+    assert f"compare/2.6.1...{version}" in notes
     release = next(s for s in steps if s["name"] == "Create Release")
     assert release["with"]["target_commitish"] == "${{ github.sha }}"
 

@@ -19,6 +19,33 @@ LivingMemory 的默认配置已经适合大多数场景。真正需要调整的�
 | 高质量召回 | 开启图记忆和原子化，`recall_engine.top_k` 设置为 5-8 |
 | 成本敏感 | 降低 `top_k`，关闭跨轮次扩展检索，适当增大总结触发轮次 |
 
+## 适配器互通与旧记忆
+
+在设置页的访问与隔离分组中选择“互通的适配器”（`filtering_settings.shared_adapter_ids`）。选中的适配器实例共享记忆候选，未选中的实例各自隔离；同类型的两个机器人也按不同实例 ID 区分。未设置名单时不额外限制适配器，实际范围由会话和人格配置决定；保存其他选项不会自动启用名单；启用名单后，新增加且未选中的适配器默认隔离。
+
+| 适配器 | 会话隔离 | 可见范围 |
+| --- | --- | --- |
+| 互通 | 开启 | 仍按各自完整会话 ID 隔离 |
+| 互通 | 关闭 | 互通实例之间共享候选 |
+| 隔离 | 开启 | 当前实例、当前会话 |
+| 隔离 | 关闭 | 当前实例的多个会话 |
+
+人格过滤始终遵循原配置；`user` 模式也保留原有平台用户范围，不会把不同平台用户 ID 认作同一个人。原始对话和近期消息缓存仍按真实会话保存。
+
+已有按实际会话保存的旧记忆，可保留 `legacy` 模式并关闭会话过滤，按互通名单共享读取，无需改写旧作用域。例如：
+
+```json
+{"filtering_settings":{"memory_scope_mode":"legacy","use_session_filtering":false,"use_persona_filtering":true,"shared_adapter_ids":["qq-main","wechat-main"]}}
+```
+
+首次启动会从来源会话、保留原文和旧作用域恢复适配器归属，并同步主文档、原子、图条目和独立图向量文档的元数据。无法唯一确定来源、多个来源混合以及来源已丢失的记录保持未归属；启用名单后，这些记录需要先分配归属才能参与适配器召回。打开设置页的“记忆归属”，可按旧作用域分配未归属记录，也可将旧适配器的记录整体转交给另一个实例。
+
+修改归属前会在插件数据目录的 `backups/adapter_ownership_*` 中备份受影响的 SQLite 库，更新失败回滚事务。迁移保留正文、原始会话、人格和文档 ID，不重新生成 Embedding，也不重建 FAISS 或 FTS。整合与写入去重保留适配器归属，避免把不同来源压成无法拆分的一条记录。
+
+手动批量转交归属前，请暂停相关适配器并等待进行中的总结结束，完成后再恢复；已配置但未启动的适配器仍可选择。迁移只改归属，不改变 `session_id`，因此更换适配器后仍开启会话隔离时，旧会话不会自动变成新会话。
+
+管理 API 可用 `adapter_id` 查询参数选择适配器范围；例如 `page/memories?adapter_id=qq-main` 继续与原有会话条件相交。`POST page/adapters/assign` 接受目标 `adapter_id`、原 `source_adapter_id` 和 `session_id`：原适配器为空时按旧作用域分配未归属记录，指定原适配器时转交该实例的记录。接口沿用 AstrBot 插件视图的鉴权。
+
 ## 模型 Provider
 
 | 配置项 | 默认 | 说明 |
@@ -40,9 +67,9 @@ LivingMemory 的默认配置已经适合大多数场景。真正需要调整的�
 | `session_manager.enable_full_group_capture` | `true` | 捕获群聊中未直接 @Bot 的消息，用于建立完整群聊背景 |
 | `session_manager.context_window_size` | `50` | 传给总结与上下文分析的历史消息窗口 |
 | `session_manager.max_messages_per_session` | `1000` | 单会话数据库保留消息上限 |
-| `session_manager.cleanup_batch_size` | `50` | 超限后每批清理的已总结旧消息数量 |
+| `session_manager.cleanup_batch_size` | `50` | 优先批量清理已总结消息；仍超上限时只额外删除达到上限所需的最旧消息 |
 
-群聊消息量很大时，可以适当降低 `context_window_size` 或关闭全量群聊捕获。
+群聊消息量很大时，可以适当降低 `context_window_size` 或关闭全量群聊捕获。超过 `max_messages_per_session` 时会优先删除已总结消息；已总结消息不足时，也会淘汰最旧的未总结缓存并警告，尚未形成记忆的内容可能丢失。正在处理的消息快照按消息 ID 和时间戳定位提交游标，不会因头部清理跳过剩余消息。
 
 ## 召回与注入
 
@@ -91,6 +118,7 @@ LivingMemory 的默认配置已经适合大多数场景。真正需要调整的�
 | 配置项 | 默认 | 说明 |
 | --- | --- | --- |
 | `reflection_engine.summary_trigger_rounds` | `10` | 达到多少轮对话后触发总结 |
+| `reflection_engine.max_messages_per_segment` | `120` | 每段总结的消息条数上限；同一天连续对话也按此分段 |
 | `reflection_engine.max_segments_per_run` | `10` | 单次触发最多连续总结的切分片段数；达到上限后剩余积压留到下次触发 |
 | `reflection_engine.window_split_by_day` | `true` | 跨天时只总结最老的一天，避免跨天对话合并进同一条记忆 |
 | `reflection_engine.window_split_gap_minutes` | `180` | 相邻消息空闲间隔超过该分钟数时只总结最老片段；`0` 关闭空闲间隔切分 |
@@ -126,6 +154,8 @@ LivingMemory 的默认配置已经适合大多数场景。真正需要调整的�
 主动遗忘工具默认关闭，开启后也只对管理员生效：模型只能把记忆归档（从检索中移除，documents 记录保留），不会物理删除；管理员可在 Dashboard 记忆页用 `archived` 状态筛选后改回 `active` 恢复。单次调用条数受限，并有按会话的冷却时间。
 
 自主回忆为 Beta 功能，默认关闭。开启后 `recall_long_term_memory` 支持按当前发言人检索、事件时间范围过滤、排除已看候选与游标分页，并注册 `read_memory_evidence`，按记忆 ID 读取有效事实与（可验证时）保留原文。工具调用次数、累计耗时与单次返回长度共享单次请求预算；回忆规则以临时片段追加注入。开关与三项预算始终显示在设置页，保存并成功重载插件后对新请求生效。
+
+每段输入最多 `max_messages_per_segment` 条，跨天或空闲边界更早时先在边界切分；同一任务继续处理后续片段，直到达到 `max_segments_per_run`。失败重试从仍未总结的位置开始，放弃连续失败片段也只跳过当前片段。反思触发的整合在积压任务结束后调度，整合与反思持有同一写入锁，LLM 推理仍并行执行。
 
 ## 图记忆与原子化
 

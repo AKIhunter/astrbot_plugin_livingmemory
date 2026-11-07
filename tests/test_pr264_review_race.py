@@ -115,9 +115,7 @@ async def test_rollback_atomic_with_cursor_commit(tmp_path):
         tasks.append(rollback)
         await asyncio.wait_for(deleted.wait(), 2)
         release.set()
-        committed, removed = await asyncio.wait_for(
-            asyncio.gather(writer, rollback), 2
-        )
+        committed, removed = await asyncio.wait_for(asyncio.gather(writer, rollback), 2)
         count = await store.get_message_count(sid)
         cursor = await manager.get_session_metadata(sid, "last_summarized_index", 0)
         assert removed == 2
@@ -392,9 +390,7 @@ async def test_concurrent_new_message_survives_rollback(tmp_path):
         assert removed == 2  # 只删除被撤销的 C2 两条
 
         refs = await store.get_session_message_refs_asc(sid)
-        checkpoints = [
-            (row["metadata"] or {}).get("llm_checkpoint_id") for row in refs
-        ]
+        checkpoints = [(row["metadata"] or {}).get("llm_checkpoint_id") for row in refs]
         assert checkpoints == ["C1", "C1", "C3"], checkpoints
     finally:
         store.delete_messages_from_position = original_delete
@@ -439,7 +435,6 @@ async def test_trim_keeps_inflight_summary_memory(tmp_path):
     engine = AsyncMock()
     engine.add_memory = AsyncMock(return_value=4242)
     engine.delete_memory = AsyncMock(return_value=True)
-    engine.find_similar_memory = AsyncMock(return_value=None)
     handler, manager, store = await _make_real_handler(tmp_path, memory_engine=engine)
     sid = SID_PREFIX + "trim-memory"
     entered = asyncio.Event()
@@ -519,7 +514,6 @@ async def test_cancel_after_memory_write_compensates(tmp_path):
     engine = AsyncMock()
     engine.add_memory = AsyncMock(return_value=4242)
     engine.delete_memory = AsyncMock(return_value=True)
-    engine.find_similar_memory = AsyncMock(return_value=None)
     handler, manager, store = await _make_real_handler(tmp_path, memory_engine=engine)
     sid = SID_PREFIX + "cancel-compensate"
     committing = asyncio.Event()
@@ -598,7 +592,6 @@ async def test_rollback_during_memory_write_compensates(tmp_path):
     engine = AsyncMock()
     engine.add_memory = AsyncMock(return_value=4242)
     engine.delete_memory = AsyncMock(return_value=True)
-    engine.find_similar_memory = AsyncMock(return_value=None)
     handler, manager, store = await _make_real_handler(tmp_path, memory_engine=engine)
     sid = SID_PREFIX + "compensate"
     entered = asyncio.Event()
@@ -723,9 +716,12 @@ async def test_interleavings_keep_invariant(tmp_path):
                 assert removed == 2
                 assert await _cursor(manager, sid) == 2
             else:
-                assert await asyncio.wait_for(
-                    manager.reconcile_session_tail(sid, ["C1"]), 2
-                ) == 2
+                assert (
+                    await asyncio.wait_for(
+                        manager.reconcile_session_tail(sid, ["C1"]), 2
+                    )
+                    == 2
+                )
                 committed = await manager.update_session_metadata_if_revision(
                     sid, "last_summarized_index", 4, 0
                 )
@@ -733,9 +729,7 @@ async def test_interleavings_keep_invariant(tmp_path):
                 assert await _cursor(manager, sid) == 0
 
             count = await store.get_message_count(sid)
-            cursor = await manager.get_session_metadata(
-                sid, "last_summarized_index", 0
-            )
+            cursor = await manager.get_session_metadata(sid, "last_summarized_index", 0)
             assert count == 2
             assert cursor <= count, (round_index, cursor, count)
             manager._update_session_metadata_locked = original_update

@@ -5,7 +5,6 @@ Integration-style workflow tests with mocked dependencies.
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from tests.identity_fixture_support import identity_engine_fixture, summary_window_fixture
 from astrbot_plugin_livingmemory.core.base.config_manager import ConfigManager
 from astrbot_plugin_livingmemory.core.command_handler import CommandHandler
 from astrbot_plugin_livingmemory.core.event_handler import EventHandler
@@ -25,7 +24,6 @@ def setup_bundle():
 
     memory_engine = Mock()
     memory_engine.search_memories = AsyncMock(return_value=[])
-    identity_engine_fixture(memory_engine)
     memory_engine.add_memory = AsyncMock(return_value=1)
     memory_engine.get_statistics = AsyncMock(
         return_value={
@@ -65,6 +63,16 @@ def setup_bundle():
     conversation_manager.update_session_metadata = AsyncMock(
         side_effect=_update_session_metadata
     )
+    conversation_manager.get_summary_window = AsyncMock(
+        return_value=(0, conversation_manager.get_messages_range.return_value)
+    )
+
+    async def _commit_cursor(session_id, last_message, expected_revision):
+        session_metadata["last_summarized_index"] = 2
+        session_metadata["pending_summary"] = None
+        return True
+
+    conversation_manager.commit_summary_cursor = AsyncMock(side_effect=_commit_cursor)
     conversation_manager.clear_session = AsyncMock()
     conversation_manager.store = Mock()
     conversation_manager.store.get_message_count = AsyncMock(return_value=2)
@@ -74,8 +82,6 @@ def setup_bundle():
         return_value=Mock(rowcount=1)
     )
     conversation_manager.store.connection.commit = AsyncMock()
-    conversation_manager.invalidate_cache = AsyncMock()
-    summary_window_fixture(conversation_manager)
 
     event_handler = EventHandler(
         context=context,
@@ -97,7 +103,7 @@ def setup_bundle():
 
 def _make_event():
     event = Mock()
-    event.unified_msg_origin = "test:FriendMessage:u1"
+    event.unified_msg_origin = "test:private:u1"
     event.get_message_type = Mock(return_value=MessageType.FRIEND_MESSAGE)
     event.get_sender_id = Mock(return_value="u1")
     event.get_self_id = Mock(return_value="bot")
@@ -105,8 +111,6 @@ def _make_event():
     event.get_message_str = Mock(return_value="hello")
     event.get_messages = Mock(return_value=[])
     event.get_platform_name = Mock(return_value="test")
-    event.get_group_id = Mock(return_value="")
-    event.get_extra = Mock(return_value=None)
     event.plain_result = lambda x: x
     return event
 
@@ -131,7 +135,12 @@ async def test_recall_reflection_and_search_workflow(setup_bundle):
 
     assert memory_engine.search_memories.await_count == 1
 
-    resp = Mock(role="assistant", completion_text="助手回复", tools_call_name=None, tools_call_extra_content=None)
+    resp = Mock(
+        role="assistant",
+        completion_text="助手回复",
+        tools_call_name=None,
+        tools_call_extra_content=None,
+    )
     with patch(
         "astrbot_plugin_livingmemory.core.event_handler_modules.memory_reflection.get_persona_id",
         new_callable=AsyncMock,

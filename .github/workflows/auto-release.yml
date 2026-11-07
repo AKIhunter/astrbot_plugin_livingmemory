@@ -15,7 +15,6 @@ jobs:
       version_changed: ${{ steps.check.outputs.changed }}
       new_version: ${{ steps.check.outputs.version }}
       old_version: ${{ steps.check.outputs.old_version }}
-      previous_sha: ${{ steps.check.outputs.previous_sha }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -30,15 +29,13 @@ jobs:
           echo "Current version: $CURRENT_VERSION"
 
           # 获取上一次提交的版本
-          # 只读前一提交，不改当前工作树；首版不假设旧版本标签存在。
-          if PREVIOUS_METADATA=$(git show HEAD~1:metadata.yaml 2>/dev/null); then
-            PREVIOUS_VERSION=$(printf '%s\n' "$PREVIOUS_METADATA" | grep '^version:' | awk '{print $2}')
-            PREVIOUS_SHA=$(git rev-parse HEAD~1)
+          git checkout HEAD~1 -- metadata.yaml 2>/dev/null || echo "First commit"
+          if [ -f metadata.yaml ]; then
+            PREVIOUS_VERSION=$(grep '^version:' metadata.yaml | awk '{print $2}')
+            git checkout HEAD -- metadata.yaml
           else
             PREVIOUS_VERSION="none"
-            PREVIOUS_SHA=""
           fi
-          echo "previous_sha=$PREVIOUS_SHA" >> $GITHUB_OUTPUT
           echo "Previous version: $PREVIOUS_VERSION"
 
           # 比较版本
@@ -68,7 +65,6 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.check-version.outputs.new_version }}
           PREVIOUS_VERSION: ${{ needs.check-version.outputs.old_version }}
-          PREVIOUS_SHA: ${{ needs.check-version.outputs.previous_sha }}
           RELEASE_REPOSITORY: ${{ github.repository }}
         run: |
           python3 - <<'PY'
@@ -78,7 +74,6 @@ jobs:
 
           version = os.environ["RELEASE_VERSION"]
           previous = os.environ["PREVIOUS_VERSION"]
-          previous_sha = os.environ.get("PREVIOUS_SHA", "")
           repository = os.environ["RELEASE_REPOSITORY"]
           changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
           section = re.search(
@@ -89,11 +84,10 @@ jobs:
           if section is None:
               raise SystemExit(f"Missing CHANGELOG.md section for {version}")
           notes = f"## LivingMemory {version}\n\n" + section.group(1).strip()
-          if previous_sha:
-              notes += (
-                  "\n\n---\n"
-                  f"**Full Changelog**: https://github.com/{repository}/compare/{previous_sha}...{version}\n"
-              )
+          notes += (
+              "\n\n---\n"
+              f"**Full Changelog**: https://github.com/{repository}/compare/{previous}...{version}\n"
+          )
           Path("release-notes.md").write_text(notes, encoding="utf-8")
           PY
 
@@ -113,7 +107,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: LivingMemory ${{ needs.check-version.outputs.new_version }}
           body_path: release-notes.md
-          draft: true
+          draft: false
           prerelease: ${{ steps.prerelease.outputs.value == 'true' }}
           generate_release_notes: false
         env:

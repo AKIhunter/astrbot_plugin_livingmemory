@@ -622,7 +622,7 @@ async def test_command_handlers_with_real_database(real_db_stack):
     conversation_manager = real_db_stack["conversation_manager"]
     memory_db_path = real_db_stack["memory_db_path"]
 
-    session_id = "test:FriendMessage:user-1"
+    session_id = "test:private:cmd-session"
     event = _TestEvent(session_id, "search me")
 
     memory_id = await memory_engine.add_memory(
@@ -712,7 +712,7 @@ async def test_recall_injection_with_real_database(real_db_stack):
     memory_engine = real_db_stack["memory_engine"]
     event_handler = real_db_stack["event_handler"]
 
-    session_id = "test:FriendMessage:user-1"
+    session_id = "test:private:recall-session"
     await memory_engine.add_memory(
         content="User is considering buying noise-cancelling headphones.",
         session_id=session_id,

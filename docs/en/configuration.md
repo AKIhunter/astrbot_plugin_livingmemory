@@ -19,6 +19,33 @@ LivingMemory defaults work for most users. The settings you usually need to touc
 | Higher recall quality | Keep graph memory and atomization enabled; set `recall_engine.top_k` to 5-8 |
 | Cost-sensitive setup | Lower `top_k`, disable recent-context expansion, and increase summary trigger rounds |
 
+## Adapter sharing and existing memories
+
+Select “Adapters sharing memory” (`filtering_settings.shared_adapter_ids`) in the settings access/isolation group. Selected instances share memory candidates; other instances are isolated. Two bots using the same adapter type still have separate instance IDs. An unset field adds no adapter restriction: session and persona settings determine visibility. Saving unrelated settings does not activate the new policy. After configuring the list, newly added instances are isolated until selected.
+
+| Adapter policy | Session isolation | Visibility |
+| --- | --- | --- |
+| Shared | Enabled | Each complete session ID remains isolated |
+| Shared | Disabled | Candidates from the sharing instances |
+| Isolated | Enabled | Current instance and session |
+| Isolated | Disabled | Multiple sessions of the current instance |
+
+Persona filtering continues to follow its existing setting. The `user` mode retains the original platform/user scope and does not identify different platform user IDs as one person. Source conversations and recent-message buffers remain attached to actual sessions.
+
+For existing memories stored under actual sessions, keep `legacy` mode and disable session filtering to share reads within the adapter list without rewriting old scopes. For example:
+
+```json
+{"filtering_settings":{"memory_scope_mode":"legacy","use_session_filtering":false,"use_persona_filtering":true,"shared_adapter_ids":["qq-main","wechat-main"]}}
+```
+
+The first startup recovers ownership from source sessions, retained messages and old scopes, then synchronizes metadata in parent documents, atoms, graph entries and the separate graph-vector document database. Ambiguous, mixed or missing provenance remains unassigned; after enabling the list, these records need explicit ownership before adapter recall can include them. In settings, “Memory ownership” assigns unowned records by their old scope or transfers an old instance's records to another instance.
+
+Affected SQLite databases are backed up under the plugin data directory at `backups/adapter_ownership_*` before ownership changes; a failed update rolls back its transaction. Migration retains text, source sessions, personas and document IDs without regenerating embeddings or rebuilding FAISS/FTS. Consolidation and write-time deduplication preserve adapter ownership rather than mixing records from different sources.
+
+Before manually transferring a batch, pause the affected adapters and wait for running summaries to finish, then resume after the transfer. Configured offline adapters remain selectable. Assignment changes ownership, not `session_id`; with session isolation enabled, an old session does not automatically become the new adapter's session.
+
+Management APIs accept an `adapter_id` query parameter to select the configured range; `page/memories?adapter_id=qq-main` still intersects existing session filters. `POST page/adapters/assign` accepts the target `adapter_id`, old `source_adapter_id` and `session_id`: a null source adapter assigns unowned records for that old scope; a specified source transfers that instance's records. The endpoint uses AstrBot Plugin Views authentication.
+
 ## Model providers
 
 | Key | Default | Description |
@@ -43,6 +70,8 @@ Providers that only accept streaming requests (`stream=true`) are switched to st
 | `session_manager.cleanup_batch_size` | `50` | Number of old summarized messages cleaned per batch |
 
 For very busy group chats, lower `context_window_size` or disable full group capture.
+
+History above `max_messages_per_session` first discards summarized messages. If insufficient, the oldest unsummarized buffered messages are also removed with a warning; content not yet stored in memory may be lost. Active snapshots commit their cursor by message ID and timestamp so trimming does not skip retained messages.
 
 ## Recall and injection
 
@@ -91,6 +120,7 @@ Aliases are matched in this order: `platform:user ID`, user ID, then current use
 | Key | Default | Description |
 | --- | --- | --- |
 | `reflection_engine.summary_trigger_rounds` | `10` | Number of conversation rounds before summarization |
+| `reflection_engine.max_messages_per_segment` | `120` | Maximum messages per summary segment, including uninterrupted same-day chats |
 | `reflection_engine.max_segments_per_run` | `10` | Maximum split segments summarized by one trigger; remaining backlog waits for the next trigger |
 | `reflection_engine.window_split_by_day` | `true` | Summarizes only the oldest day when a window crosses midnight, so multi-day chats are not merged into one memory |
 | `reflection_engine.window_split_gap_minutes` | `180` | Summarizes only the oldest segment when the idle gap between messages exceeds this many minutes; `0` disables gap splitting |
@@ -106,6 +136,9 @@ Lower `summary_trigger_rounds` if you want the bot to remember faster. Raise it 
 Summary windows are still triggered by unsummarized rounds, but they no longer merge across days or long idle gaps: when a boundary exists, coherent segments are summarized oldest-first and the same background task keeps consuming the backlog until it is empty or `max_segments_per_run` is reached. Any remaining backlog is consumed by a later trigger. Stored message time prefers the platform message timestamp and falls back to the receipt time when it is missing or implausible (for example millisecond timestamps or a clock clearly ahead), so window boundaries follow when messages actually happened.
 
 Retained source is written only to the SQLite `memory_sources` table, not to vector, BM25, graph, or atom indexes, so it does not increase vector count. It does increase database disk usage. Re-summarizing from Dashboard calls the LLM once, replaces the old memory, and regenerates its embedding and all derived indexes.
+
+Each input contains at most `max_messages_per_segment` messages; earlier day/idle boundaries still split first. The same task continues up to `max_segments_per_run`. Retries start at the retained unsummarized cursor; abandoning a repeatedly failed segment skips only that segment. Reflection-triggered consolidation is scheduled after backlog processing, and its persistence shares a lock with reflection while LLM inference remains concurrent.
+
 
 ## Agent tools
 

@@ -3,7 +3,6 @@
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from tests.identity_fixture_support import identity_engine_fixture
 from astrbot.api.platform import MessageType
 
 from astrbot_plugin_livingmemory.core.base.config_manager import ConfigManager
@@ -37,7 +36,6 @@ def _make_handler(agent_tools, **recall_engine):
     )
     memory_engine = Mock()
     memory_engine.search_memories = AsyncMock(return_value=[])
-    identity_engine_fixture(memory_engine)
     memory_processor = Mock()
     conversation_manager = Mock()
     conversation_manager.add_message_from_event = AsyncMock(
@@ -62,16 +60,13 @@ def _make_handler(agent_tools, **recall_engine):
 
 def _make_event():
     event = Mock()
-    event.unified_msg_origin = "test:FriendMessage:sid-1"
+    event.unified_msg_origin = "test:private:sid-1"
     event.get_message_type = Mock(return_value=MessageType.FRIEND_MESSAGE)
     event.get_sender_id = Mock(return_value="user-1")
     event.get_sender_name = Mock(return_value="Tester")
     event.get_message_str = Mock(return_value="还记得我吗")
     event.get_messages = Mock(return_value=[])
     event.get_platform_name = Mock(return_value="test")
-    event.get_self_id = Mock(return_value="bot-1")
-    event.get_group_id = Mock(return_value="")
-    event.get_extra = Mock(return_value=None)
     return event
 
 
